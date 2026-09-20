@@ -6,6 +6,10 @@ The project is being developed as a server-authoritative multiplayer vertical sl
 The initial world is a small island where players explore, gather resources, build shelters,
 and discover abandoned research facilities.
 
+## Client preview
+
+![Frontier Echoes client preview](images/frontier_client.png)
+
 ## Workspace
 
 - `crates/client` — client entry point and rendering/input code
