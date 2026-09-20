@@ -10,6 +10,12 @@ pub struct CharacterState {
     pub stamina: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct Asset {
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: PgPool,
@@ -83,5 +89,25 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn load_asset(&self, asset_key: &str) -> Result<Option<Asset>, sqlx::Error> {
+        let asset = sqlx::query(
+            "SELECT content_type, data
+             FROM game_assets
+             WHERE asset_key = $1",
+        )
+        .bind(asset_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        asset
+            .map(|row| {
+                Ok(Asset {
+                    content_type: row.try_get("content_type")?,
+                    data: row.try_get::<String, _>("data")?.into_bytes(),
+                })
+            })
+            .transpose()
     }
 }

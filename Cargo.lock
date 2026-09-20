@@ -406,6 +406,7 @@ version = "0.1.0"
 dependencies = [
  "frontier-shared",
  "macroquad",
+ "serde_json",
 ]
 
 [[package]]
@@ -427,6 +428,9 @@ dependencies = [
 [[package]]
 name = "frontier-shared"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "futures-channel"

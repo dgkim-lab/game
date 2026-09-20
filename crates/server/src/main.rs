@@ -6,6 +6,8 @@ use config::Config;
 use database::Database;
 use frontier_shared::{decode_client_message, encode_server_snapshot, PlayerId, PlayerSnapshot};
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Instant};
 use tracing::{error, info, warn};
 
@@ -63,6 +65,14 @@ async fn main() {
         "database pool configured"
     );
     info!(character = %config.character_name, "loading character");
+    let asset_addr = config.asset_addr.clone();
+    let asset_database = database.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_asset_server(&asset_addr, asset_database).await {
+            error!(%error, "asset server stopped");
+        }
+    });
+    info!(address = %config.asset_addr, "asset server started");
 
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
@@ -171,4 +181,48 @@ fn redact_database_url(database_url: &str) -> String {
         &database_url[..scheme_end],
         &database_url[at + 1..]
     )
+}
+
+async fn run_asset_server(address: &str, database: Database) -> std::io::Result<()> {
+    let listener = TcpListener::bind(address).await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let request_database = database.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_asset(stream, request_database).await {
+                tracing::debug!(%error, "asset request failed");
+            }
+        });
+    }
+}
+
+async fn serve_asset(mut stream: TcpStream, database: Database) -> std::io::Result<()> {
+    let mut request = [0; 1024];
+    let size = stream.read(&mut request).await?;
+    let request = String::from_utf8_lossy(&request[..size]);
+    let path = request.split_whitespace().nth(1).unwrap_or_default();
+
+    if path != "/assets/world.json" {
+        let body = b"not found";
+        let response = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(body).await?;
+        return Ok(());
+    }
+
+    let asset = database
+        .load_asset("world.json")
+        .await
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "asset not found"))?;
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        asset.content_type,
+        asset.data.len()
+    );
+    stream.write_all(headers.as_bytes()).await?;
+    stream.write_all(&asset.data).await
 }

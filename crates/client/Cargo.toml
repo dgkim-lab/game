@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 frontier-shared = { path = "../shared" }
 macroquad = "0.4"
+serde_json = "1"

@@ -40,6 +40,10 @@ The server now connects to PostgreSQL, loads the configured development characte
 saves its position every five seconds. The UDP address, tick rate, character name, and
 maximum database connection setting can also be changed in `.env`.
 
+The server also provides the world asset manifest over HTTP on `GAME_ASSET_ADDR`. The
+manifest is loaded from the PostgreSQL `game_assets` table, and the client downloads it
+before opening the game window.
+
 ## Server tracing
 
 The server emits structured `tracing` logs to stdout. To export spans over OTLP/gRPC to an

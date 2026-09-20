@@ -1,12 +1,22 @@
-use frontier_shared::{decode_server_message, encode_client_input, PlayerInput, PlayerSnapshot};
+use frontier_shared::{
+    decode_server_message, encode_client_input, PlayerInput, PlayerSnapshot, WorldAsset,
+};
 use macroquad::prelude::*;
-use std::net::UdpSocket;
+use std::{
+    io::{Read, Write},
+    net::{TcpStream, UdpSocket},
+};
 
 const SERVER_ADDRESS: &str = "127.0.0.1:4000";
+const ASSET_SERVER_ADDRESS: &str = "127.0.0.1:4100";
 const WORLD_SIZE: f32 = 800.0;
 
 #[macroquad::main("Frontier Echoes")]
 async fn main() {
+    let world = download_world_asset().unwrap_or_else(|error| {
+        eprintln!("could not download world asset: {error}");
+        std::process::exit(1);
+    });
     let socket = UdpSocket::bind("0.0.0.0:0").expect("bind client socket");
     socket
         .connect(SERVER_ADDRESS)
@@ -37,8 +47,8 @@ async fn main() {
             }
         }
 
-        clear_background(Color::from_rgba(17, 29, 39, 255));
-        draw_world();
+        clear_background(color(world.background));
+        draw_world(&world);
         draw_circle(player.x, player.y, 16.0, SKYBLUE);
         draw_circle_lines(player.x, player.y, 16.0, 2.0, WHITE);
 
@@ -60,36 +70,44 @@ async fn main() {
     }
 }
 
-fn draw_world() {
-    draw_rectangle(
-        0.0,
-        0.0,
-        WORLD_SIZE,
-        WORLD_SIZE,
-        Color::from_rgba(45, 94, 65, 255),
-    );
+fn draw_world(world: &WorldAsset) {
+    draw_rectangle(0.0, 0.0, WORLD_SIZE, WORLD_SIZE, color(world.ground));
 
-    for x in (48..=752).step_by(64) {
-        for y in (48..=752).step_by(64) {
-            draw_circle(x as f32, y as f32, 5.0, Color::from_rgba(65, 126, 76, 180));
-        }
+    for [x, y] in &world.dots {
+        draw_circle(*x, *y, 5.0, color(world.dot));
     }
 
-    draw_rectangle(
-        170.0,
-        180.0,
-        120.0,
-        90.0,
-        Color::from_rgba(115, 78, 49, 255),
-    );
-    draw_rectangle(195.0, 205.0, 70.0, 65.0, Color::from_rgba(76, 49, 36, 255));
-    draw_rectangle(
-        550.0,
-        480.0,
-        140.0,
-        80.0,
-        Color::from_rgba(101, 72, 51, 255),
-    );
-    draw_circle(625.0, 190.0, 34.0, Color::from_rgba(33, 110, 136, 255));
-    draw_circle(625.0, 190.0, 25.0, Color::from_rgba(47, 143, 165, 255));
+    for decoration in &world.decorations {
+        let fill = color(decoration.color);
+        match decoration.kind.as_str() {
+            "water" | "water_inner" => {
+                draw_circle(decoration.x, decoration.y, decoration.w, fill);
+            }
+            _ => draw_rectangle(decoration.x, decoration.y, decoration.w, decoration.h, fill),
+        }
+    }
+}
+
+fn color(value: [u8; 4]) -> Color {
+    Color::from_rgba(value[0], value[1], value[2], value[3])
+}
+
+fn download_world_asset() -> Result<WorldAsset, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(ASSET_SERVER_ADDRESS)?;
+    stream.write_all(
+        b"GET /assets/world.json HTTP/1.1\r\nHost: frontier-server\r\nConnection: close\r\n\r\n",
+    )?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("invalid asset response")?;
+    let headers = std::str::from_utf8(&response[..header_end])?;
+    if !headers.starts_with("HTTP/1.1 200") {
+        return Err(format!("asset request failed: {headers}").into());
+    }
+
+    Ok(serde_json::from_slice(&response[header_end + 4..])?)
 }

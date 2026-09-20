@@ -1,7 +1,28 @@
 //! Types shared by the Frontier Echoes client and server.
 
+use serde::Deserialize;
+
 /// Stable identifier for a connected player.
 pub type PlayerId = u64;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorldAsset {
+    pub background: [u8; 4],
+    pub ground: [u8; 4],
+    pub dot: [u8; 4],
+    pub dots: Vec<[f32; 2]>,
+    pub decorations: Vec<WorldDecoration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorldDecoration {
+    pub kind: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: [u8; 4],
+}
 
 pub const PROTOCOL_VERSION: u8 = 1;
 const MAGIC: [u8; 2] = *b"FE";

@@ -47,7 +47,9 @@ already been applied to a shared database; create a new migration instead.
 2. Run `sqlx migrate run`.
 3. Start `frontier-server`.
 
-The initial migration creates accounts, characters, inventory items, and buildings. The
+The migrations create accounts, characters, inventory items, buildings, and the
+`game_assets` table. The initial world manifest is seeded into `game_assets` and served
+from PostgreSQL by the asset endpoint. The
 server connects to PostgreSQL on startup, loads or creates the configured development
 character, and periodically saves its position, health, and stamina. Authentication and
 multiple-character identity are intentionally not implemented yet; `GAME_CHARACTER_NAME`
