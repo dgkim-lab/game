@@ -1,0 +1,9 @@
+[package]
+name = "frontier-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+frontier-shared = { path = "../shared" }
+macroquad = "0.4"
