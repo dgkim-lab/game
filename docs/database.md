@@ -48,5 +48,7 @@ already been applied to a shared database; create a new migration instead.
 3. Start `frontier-server`.
 
 The initial migration creates accounts, characters, inventory items, and buildings. The
-server currently only validates the database configuration; repository queries and actual
-save/load behavior will be implemented in the persistence milestone.
+server connects to PostgreSQL on startup, loads or creates the configured development
+character, and periodically saves its position, health, and stamina. Authentication and
+multiple-character identity are intentionally not implemented yet; `GAME_CHARACTER_NAME`
+is a temporary development identity.

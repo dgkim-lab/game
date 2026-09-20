@@ -4,6 +4,7 @@ use std::{env, error::Error, fmt};
 pub struct Config {
     pub server_addr: String,
     pub database_url: String,
+    pub character_name: String,
     pub tick_hz: u64,
     pub database_max_connections: u32,
 }
@@ -25,12 +26,14 @@ impl Config {
 
         let database_url = required("DATABASE_URL")?;
         let server_addr = optional("GAME_SERVER_ADDR", "127.0.0.1:4000");
+        let character_name = optional("GAME_CHARACTER_NAME", "local-player");
         let tick_hz = parse_positive("GAME_TICK_HZ", 60)?;
         let database_max_connections = parse_positive("DATABASE_MAX_CONNECTIONS", 5)? as u32;
 
         Ok(Self {
             server_addr,
             database_url,
+            character_name,
             tick_hz,
             database_max_connections,
         })

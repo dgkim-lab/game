@@ -36,9 +36,9 @@ cp .env.example .env
 cargo run -p frontier-server
 ```
 
-The server currently reads the database configuration and validates it, while the actual
-save/load repository is part of the persistence milestone. The UDP address, tick rate,
-and maximum database connection setting can also be changed in `.env`.
+The server now connects to PostgreSQL, loads the configured development character, and
+saves its position every five seconds. The UDP address, tick rate, character name, and
+maximum database connection setting can also be changed in `.env`.
 
 The first playable slice now includes a Macroquad graphical client and a UDP server.
 Start the server in one terminal, then start the client in another:
