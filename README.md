@@ -12,6 +12,8 @@ and discover abandoned research facilities.
 - `crates/server` — authoritative world simulation and backend entry point
 - `crates/shared` — types shared by the client and server
 - `docs/architecture.md` — initial technical boundaries
+- `docs/database.md` — PostgreSQL migration workflow
+- `MILESTONES.md` — staged development roadmap and acceptance criteria
 
 ## Getting started
 
@@ -23,6 +25,20 @@ cargo test --workspace
 cargo run -p frontier-server
 cargo run -p frontier-client
 ```
+
+## Server configuration
+
+Copy `.env.example` to `.env` and replace `DATABASE_URL` with the connection string for
+your existing PostgreSQL database. The `.env` file is ignored by Git.
+
+```bash
+cp .env.example .env
+cargo run -p frontier-server
+```
+
+The server currently reads the database configuration and validates it, while the actual
+save/load repository is part of the persistence milestone. The UDP address, tick rate,
+and maximum database connection setting can also be changed in `.env`.
 
 The first playable slice now includes a Macroquad graphical client and a UDP server.
 Start the server in one terminal, then start the client in another:

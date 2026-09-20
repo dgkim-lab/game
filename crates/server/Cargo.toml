@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dotenvy = "0.15"
 frontier-shared = { path = "../shared" }
