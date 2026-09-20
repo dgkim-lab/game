@@ -34,3 +34,16 @@ database, or operating-system APIs.
 The current implementation uses UDP to exercise the client/server boundary early. It is
 intended for local development only; production networking will need authentication,
 timeouts, replay protection, protocol versioning, and a more robust transport strategy.
+
+## Protocol envelope
+
+Gameplay packets use a shared versioned envelope:
+
+```text
+magic | version | message type | sequence | payload length | payload
+  2B       1B          1B            4B           2B
+```
+
+The shared crate validates the envelope before decoding a message. New messages should be
+added as new `MessageType` variants and should preserve compatibility with existing packet
+versions whenever possible.

@@ -4,7 +4,7 @@ mod telemetry;
 
 use config::Config;
 use database::Database;
-use frontier_shared::{PlayerId, PlayerInput, PlayerSnapshot};
+use frontier_shared::{decode_client_message, encode_server_snapshot, PlayerId, PlayerSnapshot};
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
 use tokio::time::{sleep, Instant};
 use tracing::{error, info, warn};
@@ -66,7 +66,7 @@ async fn main() {
 
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
-    let mut buffer = [0; PlayerInput::BYTE_LEN];
+    let mut buffer = [0; 256];
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
     let mut next_save = Instant::now() + save_interval;
@@ -74,9 +74,10 @@ async fn main() {
 
     loop {
         while let Ok((size, address)) = socket.recv_from(&mut buffer) {
-            let Some(input) = PlayerInput::decode(&buffer[..size]) else {
+            let Ok(message) = decode_client_message(&buffer[..size]) else {
                 continue;
             };
+            let input = message.input;
 
             if !players.contains_key(&address) {
                 let character = database
@@ -120,7 +121,8 @@ async fn main() {
                 x: player.x,
                 y: player.y,
             };
-            let _ = socket.send_to(&snapshot.encode(), address);
+            let packet = encode_server_snapshot(message.sequence, snapshot);
+            let _ = socket.send_to(&packet, address);
         }
 
         if Instant::now() >= next_save {

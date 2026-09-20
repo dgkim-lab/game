@@ -3,6 +3,10 @@
 /// Stable identifier for a connected player.
 pub type PlayerId = u64;
 
+pub const PROTOCOL_VERSION: u8 = 1;
+const MAGIC: [u8; 2] = *b"FE";
+const HEADER_LEN: usize = 10;
+
 /// Input accepted by the authoritative simulation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlayerInput {
@@ -16,6 +20,47 @@ pub struct PlayerSnapshot {
     pub player_id: PlayerId,
     pub x: f32,
     pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MessageType {
+    ClientInput = 1,
+    ServerSnapshot = 2,
+}
+
+impl TryFrom<u8> for MessageType {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::ClientInput),
+            2 => Ok(Self::ServerSnapshot),
+            _ => Err(DecodeError::UnknownMessageType(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientMessage {
+    pub sequence: u32,
+    pub input: PlayerInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServerMessage {
+    pub sequence: u32,
+    pub snapshot: PlayerSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeError {
+    TooShort,
+    InvalidMagic,
+    UnsupportedVersion(u8),
+    UnknownMessageType(u8),
+    InvalidPayloadLength,
+    InvalidPayload,
 }
 
 impl PlayerInput {
@@ -58,5 +103,121 @@ impl PlayerSnapshot {
             x: f32::from_le_bytes(bytes[8..12].try_into().ok()?),
             y: f32::from_le_bytes(bytes[12..16].try_into().ok()?),
         })
+    }
+}
+
+pub fn encode_client_input(sequence: u32, input: PlayerInput) -> Vec<u8> {
+    encode_message(MessageType::ClientInput, sequence, &input.encode())
+}
+
+pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
+    let (message_type, sequence, payload) = decode_message(bytes)?;
+    if message_type != MessageType::ClientInput {
+        return Err(DecodeError::UnknownMessageType(message_type as u8));
+    }
+
+    Ok(ClientMessage {
+        sequence,
+        input: PlayerInput::decode(payload).ok_or(DecodeError::InvalidPayload)?,
+    })
+}
+
+pub fn encode_server_snapshot(sequence: u32, snapshot: PlayerSnapshot) -> Vec<u8> {
+    encode_message(MessageType::ServerSnapshot, sequence, &snapshot.encode())
+}
+
+pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError> {
+    let (message_type, sequence, payload) = decode_message(bytes)?;
+    if message_type != MessageType::ServerSnapshot {
+        return Err(DecodeError::UnknownMessageType(message_type as u8));
+    }
+
+    Ok(ServerMessage {
+        sequence,
+        snapshot: PlayerSnapshot::decode(payload).ok_or(DecodeError::InvalidPayload)?,
+    })
+}
+
+fn encode_message(message_type: MessageType, sequence: u32, payload: &[u8]) -> Vec<u8> {
+    let payload_len = u16::try_from(payload.len()).expect("protocol payload is too large");
+    let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
+    bytes.extend_from_slice(&MAGIC);
+    bytes.push(PROTOCOL_VERSION);
+    bytes.push(message_type as u8);
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(&payload_len.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn decode_message(bytes: &[u8]) -> Result<(MessageType, u32, &[u8]), DecodeError> {
+    if bytes.len() < HEADER_LEN {
+        return Err(DecodeError::TooShort);
+    }
+    if bytes[0..2] != MAGIC {
+        return Err(DecodeError::InvalidMagic);
+    }
+    if bytes[2] != PROTOCOL_VERSION {
+        return Err(DecodeError::UnsupportedVersion(bytes[2]));
+    }
+
+    let message_type = MessageType::try_from(bytes[3])?;
+    let sequence = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| DecodeError::TooShort)?);
+    let payload_len = usize::from(u16::from_le_bytes(
+        bytes[8..10].try_into().map_err(|_| DecodeError::TooShort)?,
+    ));
+    if bytes.len() != HEADER_LEN + payload_len {
+        return Err(DecodeError::InvalidPayloadLength);
+    }
+
+    Ok((message_type, sequence, &bytes[HEADER_LEN..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_input_round_trips_through_versioned_envelope() {
+        let input = PlayerInput {
+            move_x: -1,
+            move_y: 1,
+        };
+        let packet = encode_client_input(42, input);
+        let decoded = decode_client_message(&packet).expect("valid client packet");
+
+        assert_eq!(decoded.sequence, 42);
+        assert_eq!(decoded.input, input);
+    }
+
+    #[test]
+    fn server_snapshot_round_trips_through_versioned_envelope() {
+        let snapshot = PlayerSnapshot {
+            player_id: 7,
+            x: 12.5,
+            y: 18.25,
+        };
+        let packet = encode_server_snapshot(99, snapshot);
+        let decoded = decode_server_message(&packet).expect("valid server packet");
+
+        assert_eq!(decoded.sequence, 99);
+        assert_eq!(decoded.snapshot, snapshot);
+    }
+
+    #[test]
+    fn decoder_rejects_wrong_version_and_trailing_bytes() {
+        let mut packet = encode_client_input(1, PlayerInput::default());
+        packet[2] = PROTOCOL_VERSION + 1;
+        assert_eq!(
+            decode_client_message(&packet),
+            Err(DecodeError::UnsupportedVersion(PROTOCOL_VERSION + 1))
+        );
+
+        let mut packet = encode_client_input(1, PlayerInput::default());
+        packet.push(0);
+        assert_eq!(
+            decode_client_message(&packet),
+            Err(DecodeError::InvalidPayloadLength)
+        );
     }
 }

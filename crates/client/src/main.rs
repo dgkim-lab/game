@@ -1,4 +1,4 @@
-use frontier_shared::{PlayerInput, PlayerSnapshot};
+use frontier_shared::{decode_server_message, encode_client_input, PlayerInput, PlayerSnapshot};
 use macroquad::prelude::*;
 use std::net::UdpSocket;
 
@@ -20,18 +20,20 @@ async fn main() {
         x: 400.0,
         y: 300.0,
     };
-    let mut receive_buffer = [0; PlayerSnapshot::BYTE_LEN];
+    let mut receive_buffer = [0; 256];
+    let mut sequence = 0;
 
     loop {
         let input = PlayerInput {
             move_x: i8::from(is_key_down(KeyCode::D)) - i8::from(is_key_down(KeyCode::A)),
             move_y: i8::from(is_key_down(KeyCode::S)) - i8::from(is_key_down(KeyCode::W)),
         };
-        let _ = socket.send(&input.encode());
+        let _ = socket.send(&encode_client_input(sequence, input));
+        sequence = sequence.wrapping_add(1);
 
         while let Ok(size) = socket.recv(&mut receive_buffer) {
-            if let Some(snapshot) = PlayerSnapshot::decode(&receive_buffer[..size]) {
-                player = snapshot;
+            if let Ok(message) = decode_server_message(&receive_buffer[..size]) {
+                player = message.snapshot;
             }
         }
 
