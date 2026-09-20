@@ -21,6 +21,8 @@ Goal: two local clients can share a stable small world.
 - [ ] Server snapshots containing all visible players
 - [ ] Client interpolation for remote players
 - [ ] Input validation and movement speed limits
+- [ ] Nearby-player replication and broadcast fan-out
+- [ ] Sequence validation and stale/out-of-order packet rejection
 - [ ] Basic protocol version and message error handling
 - [ ] Integration test for connect, move, snapshot, and disconnect
 
@@ -48,11 +50,13 @@ Goal: player progress survives a server restart.
 
 - [ ] Account registration and login flow
 - [ ] Secure password handling and session tokens
+- [ ] One authenticated session mapped to one database character
 - [ ] PostgreSQL persistence layer
 - [ ] Character position, inventory, health, and crafted items saved
 - [ ] Periodic saves and graceful shutdown save
 - [ ] Migration strategy for database schema changes
 - [ ] Server-side ownership checks for all saved data
+- [ ] Reconnect resumes the authenticated player's own character
 
 Acceptance criteria: a player can leave, restart the server, reconnect, and retain their
 character progress without duplicating or losing items.
@@ -93,12 +97,13 @@ Goal: a small group can play safely on a hosted server.
 
 - [ ] Production transport and authentication review
 - [ ] Rate limiting and abuse prevention
+- [ ] Multiplayer load test with packet-loss and reconnect scenarios
 - [ ] Server metrics, structured logs, and health checks
 - [ ] Crash recovery and automated backups
 - [ ] Admin commands and moderation tools
 - [ ] Configuration through environment variables
 - [ ] Docker-based deployment
-- [ ] Load test with the target concurrent player count
+- [ ] Load test with the target concurrent player count and documented limits
 - [ ] End-to-end test from clean install to saved character
 
 Acceptance criteria: the server can run unattended, recover from common failures, and
