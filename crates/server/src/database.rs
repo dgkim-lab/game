@@ -1,4 +1,5 @@
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use tracing::instrument;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CharacterState {
@@ -23,6 +24,7 @@ impl Database {
         Ok(Self { pool })
     }
 
+    #[instrument(skip(self), fields(character.name = character_name))]
     pub async fn load_or_create_character(
         &self,
         character_name: &str,
@@ -59,6 +61,7 @@ impl Database {
         })
     }
 
+    #[instrument(skip(self), fields(character.id = character_id))]
     pub async fn save_character(
         &self,
         character_id: i64,

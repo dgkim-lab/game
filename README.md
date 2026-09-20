@@ -40,6 +40,25 @@ The server now connects to PostgreSQL, loads the configured development characte
 saves its position every five seconds. The UDP address, tick rate, character name, and
 maximum database connection setting can also be changed in `.env`.
 
+## Server tracing
+
+The server emits structured `tracing` logs to stdout. To export spans over OTLP/gRPC to an
+OpenTelemetry Collector or Jaeger, set this in `.env`:
+
+```env
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+RUST_LOG=frontier_server=info
+```
+
+For local Jaeger development:
+
+```bash
+docker run --rm -p 16686:16686 -p 4317:4317 \
+  -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:latest
+```
+
+View traces at `http://localhost:16686`.
+
 The first playable slice now includes a Macroquad graphical client and a UDP server.
 Start the server in one terminal, then start the client in another:
 

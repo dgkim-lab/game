@@ -1,11 +1,13 @@
 mod config;
 mod database;
+mod telemetry;
 
 use config::Config;
 use database::Database;
 use frontier_shared::{PlayerId, PlayerInput, PlayerSnapshot};
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
 use tokio::time::{sleep, Instant};
+use tracing::{error, info, warn};
 
 const WORLD_MIN: f32 = 32.0;
 const WORLD_MAX: f32 = 768.0;
@@ -27,6 +29,15 @@ async fn main() {
         eprintln!("configuration error: {error}");
         std::process::exit(1);
     });
+    let tracer_provider =
+        telemetry::init(config.otlp_endpoint.as_deref()).unwrap_or_else(|error| {
+            eprintln!("telemetry configuration error: {error}");
+            std::process::exit(1);
+        });
+    info!(
+        otlp_enabled = config.otlp_endpoint.is_some(),
+        "telemetry initialized"
+    );
     let socket = UdpSocket::bind(&config.server_addr).unwrap_or_else(|error| {
         eprintln!(
             "could not bind game server to {}: {error}",
@@ -45,16 +56,13 @@ async fn main() {
         .set_nonblocking(true)
         .expect("configure non-blocking server socket");
 
-    println!("frontier-server listening on {}", config.server_addr);
-    println!(
-        "database configured: {}",
-        redact_database_url(&config.database_url)
+    info!(address = %config.server_addr, "frontier-server listening");
+    info!(database = %redact_database_url(&config.database_url), "database configured");
+    info!(
+        max_connections = config.database_max_connections,
+        "database pool configured"
     );
-    println!(
-        "database max connections: {}",
-        config.database_max_connections
-    );
-    println!("loading character: {}", config.character_name);
+    info!(character = %config.character_name, "loading character");
 
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
@@ -62,6 +70,7 @@ async fn main() {
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
     let mut next_save = Instant::now() + save_interval;
+    let mut shutdown_signal = Box::pin(tokio::signal::ctrl_c());
 
     loop {
         while let Ok((size, address)) = socket.recv_from(&mut buffer) {
@@ -74,7 +83,7 @@ async fn main() {
                     .load_or_create_character(&config.character_name)
                     .await
                     .unwrap_or_else(|error| {
-                        eprintln!("could not load character from PostgreSQL: {error}");
+                        error!(%error, "could not load character from PostgreSQL");
                         std::process::exit(1);
                     });
                 let player = PlayerState {
@@ -85,7 +94,7 @@ async fn main() {
                     health: character.health,
                     stamina: character.stamina,
                 };
-                println!("player {} connected from {address}", player.id);
+                info!(player_id = player.id, %address, "player connected");
                 next_id += 1;
                 players.insert(address, player);
             }
@@ -126,14 +135,25 @@ async fn main() {
                     )
                     .await
                 {
-                    eprintln!("could not save character {}: {error}", player.character_id);
+                    error!(character_id = player.character_id, %error, "could not save character");
                 }
             }
             next_save = Instant::now() + save_interval;
         }
 
-        sleep(tick).await;
+        tokio::select! {
+            _ = sleep(tick) => {}
+            result = &mut shutdown_signal => {
+                if let Err(error) = result {
+                    warn!(%error, "shutdown signal listener failed");
+                }
+                info!("shutdown requested");
+                break;
+            }
+        }
     }
+
+    telemetry::shutdown(tracer_provider);
 }
 
 fn redact_database_url(database_url: &str) -> String {

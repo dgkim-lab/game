@@ -7,5 +7,11 @@ license.workspace = true
 [dependencies]
 dotenvy = "0.15"
 frontier-shared = { path = "../shared" }
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
