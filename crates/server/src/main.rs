@@ -190,13 +190,17 @@ fn advance_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>, del
 }
 
 fn send_snapshots(socket: &UdpSocket, players: &HashMap<std::net::SocketAddr, PlayerState>) {
-    for (address, player) in players {
-        let snapshot = PlayerSnapshot {
+    let snapshots = players
+        .values()
+        .map(|player| PlayerSnapshot {
             player_id: player.id,
             x: player.x,
             y: player.y,
-        };
-        let packet = encode_server_snapshot(player.sequence, snapshot);
+        })
+        .collect::<Vec<_>>();
+
+    for (address, player) in players {
+        let packet = encode_server_snapshot(player.sequence, player.id, &snapshots);
         let _ = socket.send_to(&packet, address);
     }
 }

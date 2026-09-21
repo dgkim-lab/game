@@ -68,10 +68,11 @@ pub struct ClientMessage {
     pub input: PlayerInput,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServerMessage {
     pub sequence: u32,
-    pub snapshot: PlayerSnapshot,
+    pub player_id: PlayerId,
+    pub snapshots: Vec<PlayerSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,8 +144,17 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
     })
 }
 
-pub fn encode_server_snapshot(sequence: u32, snapshot: PlayerSnapshot) -> Vec<u8> {
-    encode_message(MessageType::ServerSnapshot, sequence, &snapshot.encode())
+pub fn encode_server_snapshot(
+    sequence: u32,
+    player_id: PlayerId,
+    snapshots: &[PlayerSnapshot],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + snapshots.len() * PlayerSnapshot::BYTE_LEN);
+    payload.extend_from_slice(&player_id.to_le_bytes());
+    for snapshot in snapshots {
+        payload.extend_from_slice(&snapshot.encode());
+    }
+    encode_message(MessageType::ServerSnapshot, sequence, &payload)
 }
 
 pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError> {
@@ -153,9 +163,24 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         return Err(DecodeError::UnknownMessageType(message_type as u8));
     }
 
+    if payload.len() < 8 || (payload.len() - 8) % PlayerSnapshot::BYTE_LEN != 0 {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let player_id = u64::from_le_bytes(
+        payload[0..8]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    );
+
+    let snapshots = payload[8..]
+        .chunks_exact(PlayerSnapshot::BYTE_LEN)
+        .map(|chunk| PlayerSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(ServerMessage {
         sequence,
-        snapshot: PlayerSnapshot::decode(payload).ok_or(DecodeError::InvalidPayload)?,
+        player_id,
+        snapshots,
     })
 }
 
@@ -218,11 +243,33 @@ mod tests {
             x: 12.5,
             y: 18.25,
         };
-        let packet = encode_server_snapshot(99, snapshot);
+        let packet = encode_server_snapshot(99, 7, &[snapshot]);
         let decoded = decode_server_message(&packet).expect("valid server packet");
 
         assert_eq!(decoded.sequence, 99);
-        assert_eq!(decoded.snapshot, snapshot);
+        assert_eq!(decoded.player_id, 7);
+        assert_eq!(decoded.snapshots, vec![snapshot]);
+    }
+
+    #[test]
+    fn server_snapshot_can_contain_multiple_players() {
+        let snapshots = vec![
+            PlayerSnapshot {
+                player_id: 1,
+                x: 12.5,
+                y: 18.25,
+            },
+            PlayerSnapshot {
+                player_id: 2,
+                x: 40.0,
+                y: 50.0,
+            },
+        ];
+        let packet = encode_server_snapshot(99, 1, &snapshots);
+        let decoded = decode_server_message(&packet).expect("valid world snapshot");
+
+        assert_eq!(decoded.player_id, 1);
+        assert_eq!(decoded.snapshots, snapshots);
     }
 
     #[test]

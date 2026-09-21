@@ -27,6 +27,7 @@ async fn main() {
         x: 400.0,
         y: 300.0,
     };
+    let mut other_players = Vec::new();
     let mut receive_buffer = [0; 256];
     let mut sequence = 0;
 
@@ -88,7 +89,17 @@ async fn main() {
 
             while let Ok(size) = socket.recv(&mut receive_buffer) {
                 if let Ok(message) = decode_server_message(&receive_buffer[..size]) {
-                    player = message.snapshot;
+                    player.player_id = message.player_id;
+                    if let Some(own_snapshot) = message
+                        .snapshots
+                        .iter()
+                        .find(|snapshot| snapshot.player_id == player.player_id)
+                    {
+                        player = *own_snapshot;
+                    } else if let Some(first_snapshot) = message.snapshots.first() {
+                        player = *first_snapshot;
+                    }
+                    other_players = message.snapshots;
                     last_server_response = Some(Instant::now());
                     game_error = None;
                 }
@@ -100,11 +111,24 @@ async fn main() {
         let world = world.as_ref().expect("world loaded before gameplay loop");
         clear_background(color(world.background));
         draw_world(world);
+        for other in &other_players {
+            if other.player_id != player.player_id {
+                draw_circle(other.x, other.y, 14.0, ORANGE);
+                draw_circle_lines(other.x, other.y, 14.0, 2.0, WHITE);
+            }
+        }
         draw_circle(player.x, player.y, 16.0, SKYBLUE);
         draw_circle_lines(player.x, player.y, 16.0, 2.0, WHITE);
 
         draw_text("FRONTIER ECHOES", 24.0, 34.0, 28.0, WHITE);
         draw_text("WASD  Move", 24.0, 62.0, 20.0, LIGHTGRAY);
+        draw_text(
+            &format!("Players online: {}", other_players.len()),
+            24.0,
+            112.0,
+            18.0,
+            LIGHTGRAY,
+        );
         let connection_text = if game_error.is_some() || connection_lost {
             "Connection problem — press R to retry"
         } else {
