@@ -90,6 +90,10 @@ pub enum DecodeError {
 impl PlayerInput {
     pub const BYTE_LEN: usize = 2;
 
+    pub fn is_valid(self) -> bool {
+        (-1..=1).contains(&self.move_x) && (-1..=1).contains(&self.move_y)
+    }
+
     pub fn encode(self) -> [u8; Self::BYTE_LEN] {
         [self.move_x as u8, self.move_y as u8]
     }
@@ -253,6 +257,20 @@ mod tests {
                 input,
             }
         );
+    }
+
+    #[test]
+    fn player_input_rejects_values_outside_direction_range() {
+        assert!(PlayerInput {
+            move_x: 1,
+            move_y: -1
+        }
+        .is_valid());
+        assert!(!PlayerInput {
+            move_x: 2,
+            move_y: 0
+        }
+        .is_valid());
     }
 
     #[test]

@@ -28,6 +28,15 @@ enum AuthField {
     Password,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RemotePlayer {
+    player_id: u64,
+    x: f32,
+    y: f32,
+    target_x: f32,
+    target_y: f32,
+}
+
 #[macroquad::main("Frontier Echoes")]
 async fn main() {
     let mut asset_receiver = spawn_asset_download();
@@ -44,6 +53,7 @@ async fn main() {
     let mut other_players = Vec::new();
     let mut receive_buffer = [0; 256];
     let mut sequence = 0;
+    let mut last_frame = Instant::now();
     let mut session_token = std::env::var("GAME_SESSION_TOKEN").unwrap_or_default();
     let mut authenticated = false;
     let mut username = String::new();
@@ -135,6 +145,8 @@ async fn main() {
         let connection_lost = last_server_response
             .map(|time| time.elapsed() > Duration::from_secs(2))
             .unwrap_or(true);
+        let frame_delta = last_frame.elapsed().as_secs_f32().min(0.1);
+        last_frame = Instant::now();
         if is_key_pressed(KeyCode::R) && (game_error.is_some() || connection_lost) {
             match connect_game_socket() {
                 Ok(new_socket) => {
@@ -179,13 +191,19 @@ async fn main() {
                     } else if let Some(first_snapshot) = message.snapshots.first() {
                         player = *first_snapshot;
                     }
-                    other_players = message.snapshots;
+                    update_remote_players(&mut other_players, &message.snapshots, player.player_id);
                     last_server_response = Some(Instant::now());
                     game_error = None;
                 }
             }
         } else {
             game_error = Some("game server connection is not available".to_owned());
+        }
+
+        for other in &mut other_players {
+            let blend = (frame_delta * 14.0).min(1.0);
+            other.x += (other.target_x - other.x) * blend;
+            other.y += (other.target_y - other.y) * blend;
         }
 
         let world = world.as_ref().expect("world loaded before gameplay loop");
@@ -244,6 +262,39 @@ async fn main() {
         }
 
         next_frame().await;
+    }
+}
+
+fn update_remote_players(
+    remote_players: &mut Vec<RemotePlayer>,
+    snapshots: &[PlayerSnapshot],
+    local_player_id: u64,
+) {
+    remote_players.retain(|player| {
+        snapshots.iter().any(|snapshot| {
+            snapshot.player_id == player.player_id && snapshot.player_id != local_player_id
+        })
+    });
+
+    for snapshot in snapshots {
+        if snapshot.player_id == local_player_id {
+            continue;
+        }
+        if let Some(player) = remote_players
+            .iter_mut()
+            .find(|player| player.player_id == snapshot.player_id)
+        {
+            player.target_x = snapshot.x;
+            player.target_y = snapshot.y;
+        } else {
+            remote_players.push(RemotePlayer {
+                player_id: snapshot.player_id,
+                x: snapshot.x,
+                y: snapshot.y,
+                target_x: snapshot.x,
+                target_y: snapshot.y,
+            });
+        }
     }
 }
 

@@ -163,6 +163,23 @@ async fn main() {
                     let Some(player) = players.get_mut(&address) else {
                         continue;
                     };
+                    if !input.is_valid() {
+                        warn!(
+                            player_id = player.id,
+                            ?input,
+                            "rejected invalid player input"
+                        );
+                        continue;
+                    }
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        warn!(
+                            player_id = player.id,
+                            sequence,
+                            last_sequence = player.sequence,
+                            "rejected stale player input"
+                        );
+                        continue;
+                    }
                     player.input = input;
                     player.sequence = sequence;
                     if let Err(error) = presence.refresh(player.id).await {
@@ -207,6 +224,10 @@ async fn main() {
     }
 
     telemetry::shutdown(tracer_provider);
+}
+
+fn is_newer_sequence(sequence: u32, previous: u32) -> bool {
+    sequence != previous && sequence.wrapping_sub(previous) < (u32::MAX / 2) + 1
 }
 
 fn advance_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>, delta_seconds: f32) {
