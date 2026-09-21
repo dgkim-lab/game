@@ -1,7 +1,8 @@
 use frontier_shared::{
-    decode_server_message, encode_client_attack, encode_client_authenticate, encode_client_consume,
-    encode_client_craft, encode_client_input, encode_client_interact, CraftRecipe, EnemySnapshot,
-    InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
+    decode_server_message, encode_client_attack, encode_client_authenticate, encode_client_build,
+    encode_client_consume, encode_client_craft, encode_client_input, encode_client_interact,
+    BuildingSnapshot, CraftRecipe, EnemySnapshot, InventoryStack, PlayerInput, PlayerSnapshot,
+    ResourceKind, ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -16,6 +17,8 @@ const SERVER_ADDRESS: &str = "127.0.0.1:4000";
 const ASSET_SERVER_ADDRESS: &str = "127.0.0.1:4100";
 const AUTH_API_ADDRESS: &str = "127.0.0.1:8080";
 const WORLD_SIZE: f32 = 800.0;
+const BUILD_GRID_SIZE: f32 = 32.0;
+const BUILDING_SIZE: f32 = 48.0;
 
 #[derive(Clone, Copy)]
 enum AuthMode {
@@ -65,8 +68,10 @@ async fn main() {
     let mut resources: Vec<ResourceSnapshot> = Vec::new();
     let mut inventory: Vec<InventoryStack> = Vec::new();
     let mut enemies: Vec<EnemySnapshot> = Vec::new();
+    let mut buildings: Vec<BuildingSnapshot> = Vec::new();
     let mut crafted_kits = 0;
     let mut crafting_open = false;
+    let mut build_mode = false;
     let mut health = 100.0;
     let mut stamina = 100.0;
     let mut hunger = 100.0;
@@ -186,25 +191,35 @@ async fn main() {
         if is_key_pressed(KeyCode::C) {
             crafting_open = !crafting_open;
         }
+        if is_key_pressed(KeyCode::B) {
+            build_mode = !build_mode;
+            if build_mode {
+                crafting_open = false;
+            }
+        }
         if let Some(socket) = socket.as_ref() {
-            let packet = if authenticated && is_key_pressed(KeyCode::Space) {
-                encode_client_attack(sequence)
-            } else if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
-                encode_client_craft(sequence, CraftRecipe::CampKit)
-            } else if authenticated && is_key_pressed(KeyCode::F) {
-                encode_client_consume(sequence, ResourceKind::Berries)
-            } else if authenticated && is_key_pressed(KeyCode::E) {
-                nearest_resource_id(&resources, player)
-                    .map(|resource_id| encode_client_interact(sequence, resource_id))
-                    .unwrap_or_else(|| encode_client_input(sequence, input))
-            } else if authenticated {
-                encode_client_input(sequence, input)
-            } else if session_token.is_empty() {
-                game_error = Some("set GAME_SESSION_TOKEN after signing in".to_owned());
-                Vec::new()
-            } else {
-                encode_client_authenticate(sequence, &session_token)
-            };
+            let packet =
+                if authenticated && build_mode && is_mouse_button_pressed(MouseButton::Left) {
+                    let preview = build_preview_position(player);
+                    encode_client_build(sequence, preview.0, preview.1)
+                } else if authenticated && is_key_pressed(KeyCode::Space) {
+                    encode_client_attack(sequence)
+                } else if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
+                    encode_client_craft(sequence, CraftRecipe::CampKit)
+                } else if authenticated && is_key_pressed(KeyCode::F) {
+                    encode_client_consume(sequence, ResourceKind::Berries)
+                } else if authenticated && is_key_pressed(KeyCode::E) {
+                    nearest_resource_id(&resources, player)
+                        .map(|resource_id| encode_client_interact(sequence, resource_id))
+                        .unwrap_or_else(|| encode_client_input(sequence, input))
+                } else if authenticated {
+                    encode_client_input(sequence, input)
+                } else if session_token.is_empty() {
+                    game_error = Some("set GAME_SESSION_TOKEN after signing in".to_owned());
+                    Vec::new()
+                } else {
+                    encode_client_authenticate(sequence, &session_token)
+                };
             if !packet.is_empty() && socket.send(&packet).is_err() {
                 game_error = Some("could not send input to game server".to_owned());
             }
@@ -228,6 +243,7 @@ async fn main() {
                     inventory = message.inventory;
                     crafted_kits = message.crafted_kits;
                     enemies = message.enemies;
+                    buildings = message.buildings;
                     health = message.vitals.health;
                     stamina = message.vitals.stamina;
                     hunger = message.vitals.hunger;
@@ -246,11 +262,18 @@ async fn main() {
         }
 
         let world = world.as_ref().expect("world loaded before gameplay loop");
-        set_camera(&world_camera(player));
+        let camera = world_camera(player);
+        set_camera(&camera);
         clear_background(color(world.background));
         draw_world(world);
         draw_resources(&resources, player);
         draw_enemies(&enemies);
+        draw_buildings(&buildings);
+        if build_mode {
+            let mouse = mouse_position();
+            let preview = camera.screen_to_world(vec2(mouse.0, mouse.1));
+            draw_build_preview(preview.x, preview.y);
+        }
         for other in &other_players {
             if other.player_id != player.player_id {
                 draw_circle(other.x, other.y, 14.0, ORANGE);
@@ -266,10 +289,11 @@ async fn main() {
         draw_text("E  Gather nearby resource", 24.0, 86.0, 18.0, LIGHTGRAY);
         draw_text("C  Craft    F  Eat berries", 24.0, 110.0, 18.0, LIGHTGRAY);
         draw_text("Space  Attack", 24.0, 134.0, 18.0, LIGHTGRAY);
+        draw_text("B  Build mode", 24.0, 158.0, 18.0, LIGHTGRAY);
         draw_text(
             &format!("Players online: {}", other_players.len()),
             24.0,
-            160.0,
+            184.0,
             18.0,
             LIGHTGRAY,
         );
@@ -283,7 +307,7 @@ async fn main() {
         } else {
             GREEN
         };
-        draw_text(connection_text, 24.0, 184.0, 18.0, connection_color);
+        draw_text(connection_text, 24.0, 208.0, 18.0, connection_color);
         draw_text(
             &format!(
                 "Player {}  ({:.0}, {:.0})",
@@ -296,6 +320,15 @@ async fn main() {
         );
         draw_inventory(&inventory, crafted_kits);
         draw_vitals(health, stamina, hunger);
+        if build_mode {
+            draw_text(
+                "BUILD MODE  Left-click to place camp kit — B to close",
+                24.0,
+                screen_height() - 72.0,
+                18.0,
+                GREEN,
+            );
+        }
         if crafting_open {
             draw_crafting_panel(&inventory, crafted_kits);
         }
@@ -326,6 +359,68 @@ fn nearest_resource_id(resources: &[ResourceSnapshot], player: PlayerSnapshot) -
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
         .map(|(_, resource_id)| resource_id)
+}
+
+fn snap_to_build_grid(value: f32) -> f32 {
+    (value / BUILD_GRID_SIZE).round() * BUILD_GRID_SIZE
+}
+
+fn draw_build_preview(mouse_x: f32, mouse_y: f32) {
+    let x = snap_to_build_grid(mouse_x);
+    let y = snap_to_build_grid(mouse_y);
+    let half_size = BUILDING_SIZE * 0.5;
+    let valid = x >= half_size
+        && x <= WORLD_SIZE - half_size
+        && y >= half_size
+        && y <= WORLD_SIZE - half_size;
+    let fill = if valid {
+        Color::from_rgba(80, 220, 120, 120)
+    } else {
+        Color::from_rgba(220, 80, 80, 120)
+    };
+    draw_rectangle(
+        x - half_size,
+        y - half_size,
+        BUILDING_SIZE,
+        BUILDING_SIZE,
+        fill,
+    );
+    draw_rectangle_lines(
+        x - half_size,
+        y - half_size,
+        BUILDING_SIZE,
+        BUILDING_SIZE,
+        2.0,
+        fill,
+    );
+    draw_text("camp kit", x - 29.0, y + 5.0, 14.0, WHITE);
+}
+
+fn build_preview_position(player: PlayerSnapshot) -> (f32, f32) {
+    let mouse = mouse_position();
+    let preview = world_camera(player).screen_to_world(vec2(mouse.0, mouse.1));
+    (snap_to_build_grid(preview.x), snap_to_build_grid(preview.y))
+}
+
+fn draw_buildings(buildings: &[BuildingSnapshot]) {
+    let half_size = BUILDING_SIZE * 0.5;
+    for building in buildings {
+        draw_rectangle(
+            building.x - half_size,
+            building.y - half_size,
+            BUILDING_SIZE,
+            BUILDING_SIZE,
+            BROWN,
+        );
+        draw_rectangle_lines(
+            building.x - half_size,
+            building.y - half_size,
+            BUILDING_SIZE,
+            BUILDING_SIZE,
+            2.0,
+            GOLD,
+        );
+    }
 }
 
 fn world_camera(player: PlayerSnapshot) -> Camera2D {

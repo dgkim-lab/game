@@ -44,6 +44,37 @@ pub struct PlayerSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuildingSnapshot {
+    pub building_id: u32,
+    pub owner_id: PlayerId,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl BuildingSnapshot {
+    pub const BYTE_LEN: usize = 20;
+
+    fn encode(self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&self.building_id.to_le_bytes());
+        bytes.extend_from_slice(&self.owner_id.to_le_bytes());
+        bytes.extend_from_slice(&self.x.to_le_bytes());
+        bytes.extend_from_slice(&self.y.to_le_bytes());
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTE_LEN {
+            return None;
+        }
+        Some(Self {
+            building_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            owner_id: u64::from_le_bytes(bytes[4..12].try_into().ok()?),
+            x: f32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            y: f32::from_le_bytes(bytes[16..20].try_into().ok()?),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerVitals {
     pub health: f32,
     pub stamina: f32,
@@ -154,6 +185,7 @@ pub enum MessageType {
     ClientCraft = 5,
     ClientConsume = 6,
     ClientAttack = 7,
+    ClientBuild = 8,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -168,12 +200,13 @@ impl TryFrom<u8> for MessageType {
             5 => Ok(Self::ClientCraft),
             6 => Ok(Self::ClientConsume),
             7 => Ok(Self::ClientAttack),
+            8 => Ok(Self::ClientBuild),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
     Input { sequence: u32, input: PlayerInput },
     Authenticate { sequence: u32, token: String },
@@ -181,6 +214,7 @@ pub enum ClientMessage {
     Craft { sequence: u32, recipe: CraftRecipe },
     Consume { sequence: u32, kind: ResourceKind },
     Attack { sequence: u32 },
+    Build { sequence: u32, x: f32, y: f32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +227,7 @@ pub struct ServerMessage {
     pub crafted_kits: u16,
     pub vitals: PlayerVitals,
     pub enemies: Vec<EnemySnapshot>,
+    pub buildings: Vec<BuildingSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +359,13 @@ pub fn encode_client_attack(sequence: u32) -> Vec<u8> {
     encode_message(MessageType::ClientAttack, sequence, &[])
 }
 
+pub fn encode_client_build(sequence: u32, x: f32, y: f32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8);
+    payload.extend_from_slice(&x.to_le_bytes());
+    payload.extend_from_slice(&y.to_le_bytes());
+    encode_message(MessageType::ClientBuild, sequence, &payload)
+}
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
     let (message_type, sequence, payload) = decode_message(bytes)?;
     match message_type {
@@ -376,6 +418,24 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
                 return Err(DecodeError::InvalidPayload);
             }
             Ok(ClientMessage::Attack { sequence })
+        }
+        MessageType::ClientBuild => {
+            if payload.len() != 8 {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Build {
+                sequence,
+                x: f32::from_le_bytes(
+                    payload[0..4]
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidPayload)?,
+                ),
+                y: f32::from_le_bytes(
+                    payload[4..8]
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidPayload)?,
+                ),
+            })
         }
         MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
@@ -438,10 +498,36 @@ pub fn encode_server_state_with_crafting_and_vitals(
     vitals: PlayerVitals,
     enemies: &[EnemySnapshot],
 ) -> Vec<u8> {
+    encode_server_state_with_buildings(
+        sequence,
+        player_id,
+        snapshots,
+        resources,
+        inventory,
+        crafted_kits,
+        vitals,
+        enemies,
+        &[],
+    )
+}
+
+pub fn encode_server_state_with_buildings(
+    sequence: u32,
+    player_id: PlayerId,
+    snapshots: &[PlayerSnapshot],
+    resources: &[ResourceSnapshot],
+    inventory: &[InventoryStack],
+    crafted_kits: u16,
+    vitals: PlayerVitals,
+    enemies: &[EnemySnapshot],
+    buildings: &[BuildingSnapshot],
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
         12 + snapshots.len() * PlayerSnapshot::BYTE_LEN
             + resources.len() * ResourceSnapshot::BYTE_LEN
-            + inventory.len() * InventoryStack::BYTE_LEN,
+            + inventory.len() * InventoryStack::BYTE_LEN
+            + enemies.len() * EnemySnapshot::BYTE_LEN
+            + buildings.len() * BuildingSnapshot::BYTE_LEN,
     );
     payload.extend_from_slice(&player_id.to_le_bytes());
     payload.extend_from_slice(&(resources.len() as u16).to_le_bytes());
@@ -459,6 +545,10 @@ pub fn encode_server_state_with_crafting_and_vitals(
     payload.extend_from_slice(&(enemies.len() as u16).to_le_bytes());
     for enemy in enemies {
         enemy.encode(&mut payload);
+    }
+    payload.extend_from_slice(&(buildings.len() as u16).to_le_bytes());
+    for building in buildings {
+        building.encode(&mut payload);
     }
     for snapshot in snapshots {
         payload.extend_from_slice(&snapshot.encode());
@@ -569,6 +659,25 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         .collect::<Result<Vec<_>, _>>()?;
     offset = enemies_end;
 
+    if offset + 2 > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let building_count = usize::from(u16::from_le_bytes(
+        payload[offset..offset + 2]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    ));
+    offset += 2;
+    let buildings_end = offset + building_count * BuildingSnapshot::BYTE_LEN;
+    if buildings_end > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let buildings = payload[offset..buildings_end]
+        .chunks_exact(BuildingSnapshot::BYTE_LEN)
+        .map(|chunk| BuildingSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
+        .collect::<Result<Vec<_>, _>>()?;
+    offset = buildings_end;
+
     if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
         return Err(DecodeError::InvalidPayload);
     }
@@ -586,6 +695,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         crafted_kits,
         vitals,
         enemies,
+        buildings,
     })
 }
 
@@ -717,6 +827,21 @@ mod tests {
     }
 
     #[test]
+    fn client_build_round_trips_through_versioned_envelope() {
+        let packet = encode_client_build(47, 320.0, 448.0);
+        let decoded = decode_client_message(&packet).expect("valid build packet");
+
+        assert_eq!(
+            decoded,
+            ClientMessage::Build {
+                sequence: 47,
+                x: 320.0,
+                y: 448.0,
+            }
+        );
+    }
+
+    #[test]
     fn server_state_round_trips_resources_and_inventory() {
         let resource = ResourceSnapshot {
             resource_id: 3,
@@ -770,6 +895,30 @@ mod tests {
 
         assert_eq!(decoded.player_id, 1);
         assert_eq!(decoded.snapshots, snapshots);
+    }
+
+    #[test]
+    fn server_state_round_trips_buildings() {
+        let building = BuildingSnapshot {
+            building_id: 4,
+            owner_id: 7,
+            x: 320.0,
+            y: 448.0,
+        };
+        let packet = encode_server_state_with_buildings(
+            99,
+            7,
+            &[],
+            &[],
+            &[],
+            0,
+            PlayerVitals::default(),
+            &[],
+            &[building],
+        );
+        let decoded = decode_server_message(&packet).expect("valid building state packet");
+
+        assert_eq!(decoded.buildings, vec![building]);
     }
 
     #[test]

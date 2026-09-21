@@ -7,7 +7,7 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_state_with_crafting_and_vitals, ClientMessage,
+    decode_client_message, encode_server_state_with_buildings, BuildingSnapshot, ClientMessage,
     CraftRecipe, EnemySnapshot, InventoryStack, PlayerId, PlayerInput, PlayerSnapshot,
     PlayerVitals, ResourceKind, ResourceSnapshot,
 };
@@ -36,6 +36,8 @@ const ENEMY_ATTACK_DAMAGE: f32 = 12.0;
 const ENEMY_ATTACK_COOLDOWN: f32 = 1.0;
 const PLAYER_ATTACK_DISTANCE: f32 = 58.0;
 const PLAYER_ATTACK_DAMAGE: f32 = 25.0;
+const BUILDING_SIZE: f32 = 48.0;
+const BUILDING_PLACEMENT_DISTANCE: f32 = 160.0;
 
 #[derive(Debug)]
 struct PlayerState {
@@ -69,6 +71,14 @@ struct EnemyState {
     y: f32,
     health: f32,
     attack_cooldown: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuildingState {
+    id: u32,
+    owner_id: PlayerId,
+    x: f32,
+    y: f32,
 }
 
 #[tokio::main]
@@ -145,6 +155,8 @@ async fn main() {
     let mut players = HashMap::new();
     let mut resources = initial_resources();
     let mut enemies = initial_enemies();
+    let mut buildings = Vec::new();
+    let mut next_building_id = 1;
     let mut buffer = [0; 256];
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
@@ -292,6 +304,30 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
+                ClientMessage::Build { sequence, x, y } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        continue;
+                    }
+                    player.sequence = sequence;
+                    let x = snap_build_coordinate(x);
+                    let y = snap_build_coordinate(y);
+                    if !try_place_building(player, x, y, &buildings) {
+                        continue;
+                    }
+                    buildings.push(BuildingState {
+                        id: next_building_id,
+                        owner_id: player.id,
+                        x,
+                        y,
+                    });
+                    next_building_id = next_building_id.wrapping_add(1).max(1);
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 
@@ -302,7 +338,7 @@ async fn main() {
                 update_survival(&mut players, config.tick_duration_seconds());
                 update_enemies(&mut enemies, &mut players, config.tick_duration_seconds());
                 respawn_dead_players(&mut players);
-                send_snapshots(&socket, &players, &resources, &enemies);
+                send_snapshots(&socket, &players, &resources, &enemies, &buildings);
 
                 if Instant::now() >= next_save {
                     for player in players.values() {
@@ -473,6 +509,7 @@ fn send_snapshots(
     players: &HashMap<std::net::SocketAddr, PlayerState>,
     resources: &[ResourceNode],
     enemies: &[EnemyState],
+    buildings: &[BuildingState],
 ) {
     let snapshots = players
         .values()
@@ -504,7 +541,16 @@ fn send_snapshots(
                 health: enemy.health,
             })
             .collect::<Vec<_>>();
-        let packet = encode_server_state_with_crafting_and_vitals(
+        let building_snapshots = buildings
+            .iter()
+            .map(|building| BuildingSnapshot {
+                building_id: building.id,
+                owner_id: building.owner_id,
+                x: building.x,
+                y: building.y,
+            })
+            .collect::<Vec<_>>();
+        let packet = encode_server_state_with_buildings(
             player.sequence,
             player.id,
             &snapshots,
@@ -517,6 +563,7 @@ fn send_snapshots(
                 hunger: player.hunger,
             },
             &enemy_snapshots,
+            &building_snapshots,
         );
         let _ = socket.send_to(&packet, address);
     }
@@ -598,6 +645,41 @@ mod tests {
         let state = players.get(&address()).expect("test player exists");
         assert_eq!(state.x, WORLD_MIN);
         assert_eq!(state.y, WORLD_MIN);
+    }
+
+    #[test]
+    fn building_placement_consumes_one_camp_kit() {
+        let mut state = player(PlayerInput::default());
+        state.crafted_kits = 2;
+
+        assert!(try_place_building(&mut state, 448.0, 320.0, &[]));
+        assert_eq!(state.crafted_kits, 1);
+    }
+
+    #[test]
+    fn building_placement_rejects_missing_kit_or_invalid_location() {
+        let mut state = player(PlayerInput::default());
+        assert!(!try_place_building(&mut state, 448.0, 320.0, &[]));
+
+        state.crafted_kits = 1;
+        assert!(!try_place_building(&mut state, 32.0, 32.0, &[]));
+        assert!(!try_place_building(&mut state, 700.0, 700.0, &[]));
+        assert_eq!(state.crafted_kits, 1);
+    }
+
+    #[test]
+    fn building_placement_rejects_overlapping_buildings() {
+        let mut state = player(PlayerInput::default());
+        state.crafted_kits = 1;
+        let buildings = [BuildingState {
+            id: 1,
+            owner_id: 2,
+            x: 448.0,
+            y: 320.0,
+        }];
+
+        assert!(!try_place_building(&mut state, 480.0, 320.0, &buildings));
+        assert_eq!(state.crafted_kits, 1);
     }
 }
 
@@ -687,6 +769,36 @@ fn craft_recipe(player: &mut PlayerState, recipe: CraftRecipe) {
         }
         CraftRecipe::CampKit => {}
     }
+}
+
+fn snap_build_coordinate(value: f32) -> f32 {
+    (value / 32.0).round() * 32.0
+}
+
+fn try_place_building(
+    player: &mut PlayerState,
+    x: f32,
+    y: f32,
+    buildings: &[BuildingState],
+) -> bool {
+    let half_size = BUILDING_SIZE * 0.5;
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < half_size
+        || x > WORLD_MAX - half_size
+        || y < half_size
+        || y > WORLD_MAX - half_size
+        || (player.x - x).hypot(player.y - y) > BUILDING_PLACEMENT_DISTANCE
+        || player.crafted_kits == 0
+        || buildings
+            .iter()
+            .any(|building| (building.x - x).hypot(building.y - y) < BUILDING_SIZE)
+    {
+        return false;
+    }
+
+    player.crafted_kits -= 1;
+    true
 }
 
 fn consume_item(player: &mut PlayerState, kind: ResourceKind) {

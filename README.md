@@ -106,8 +106,11 @@ cargo run -p frontier-client
 
 Use `W`, `A`, `S`, and `D` to move. Press `E` near a resource node to gather wood, stone,
 or berries. Press `F` to eat one berry and restore hunger. Press `C` to open the crafting
-panel and `Enter` to craft a camp kit when you have enough materials. The server validates movement, interactions, and crafting,
-then sends authoritative positions, resource counts, and inventory stacks back to the client.
+panel and `Enter` to craft a camp kit when you have enough materials. Press `B` to toggle
+build mode and preview a grid-snapped camp-kit footprint; left-click in build mode to
+place it when you have a crafted kit. The server validates movement, interactions, crafting,
+and building placement, then sends authoritative positions, resource counts, inventory
+stacks, and accepted in-memory structures back to connected clients.
 Movement consumes stamina, hunger decreases over time, and starvation damages health;
 these survival values are persisted with the character. A hostile creature chases nearby
 players; press `Space` to attack it. Defeated players respawn at the safe starting point.
