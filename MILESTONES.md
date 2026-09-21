@@ -37,7 +37,7 @@ Goal: a player can gather, craft, and survive for a short session.
 - [x] Interaction system using `E`
 - [x] Inventory with item stack limits
 - [x] Crafting recipes and a simple crafting panel
-- [ ] Health, stamina, hunger, and damage
+- [x] Health, stamina, hunger, and damage
 - [ ] One hostile creature with basic AI
 - [ ] Respawn at a safe starting location
 

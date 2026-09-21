@@ -1,7 +1,7 @@
 use frontier_shared::{
-    decode_server_message, encode_client_authenticate, encode_client_craft, encode_client_input,
-    encode_client_interact, CraftRecipe, InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind,
-    ResourceSnapshot, WorldAsset,
+    decode_server_message, encode_client_authenticate, encode_client_consume, encode_client_craft,
+    encode_client_input, encode_client_interact, CraftRecipe, InventoryStack, PlayerInput,
+    PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -66,6 +66,9 @@ async fn main() {
     let mut inventory: Vec<InventoryStack> = Vec::new();
     let mut crafted_kits = 0;
     let mut crafting_open = false;
+    let mut health = 100.0;
+    let mut stamina = 100.0;
+    let mut hunger = 100.0;
     let mut receive_buffer = [0; 2048];
     let mut sequence = 0;
     let mut last_frame = Instant::now();
@@ -185,6 +188,8 @@ async fn main() {
         if let Some(socket) = socket.as_ref() {
             let packet = if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
                 encode_client_craft(sequence, CraftRecipe::CampKit)
+            } else if authenticated && is_key_pressed(KeyCode::F) {
+                encode_client_consume(sequence, ResourceKind::Berries)
             } else if authenticated && is_key_pressed(KeyCode::E) {
                 nearest_resource_id(&resources, player)
                     .map(|resource_id| encode_client_interact(sequence, resource_id))
@@ -219,6 +224,9 @@ async fn main() {
                     resources = message.resources;
                     inventory = message.inventory;
                     crafted_kits = message.crafted_kits;
+                    health = message.vitals.health;
+                    stamina = message.vitals.stamina;
+                    hunger = message.vitals.hunger;
                     last_server_response = Some(Instant::now());
                     game_error = None;
                 }
@@ -251,10 +259,11 @@ async fn main() {
         draw_text("FRONTIER ECHOES", 24.0, 34.0, 28.0, WHITE);
         draw_text("WASD  Move", 24.0, 62.0, 20.0, LIGHTGRAY);
         draw_text("E  Gather nearby resource", 24.0, 86.0, 18.0, LIGHTGRAY);
+        draw_text("C  Craft    F  Eat berries", 24.0, 110.0, 18.0, LIGHTGRAY);
         draw_text(
             &format!("Players online: {}", other_players.len()),
             24.0,
-            112.0,
+            136.0,
             18.0,
             LIGHTGRAY,
         );
@@ -268,7 +277,7 @@ async fn main() {
         } else {
             GREEN
         };
-        draw_text(connection_text, 24.0, 136.0, 18.0, connection_color);
+        draw_text(connection_text, 24.0, 160.0, 18.0, connection_color);
         draw_text(
             &format!(
                 "Player {}  ({:.0}, {:.0})",
@@ -280,6 +289,7 @@ async fn main() {
             LIGHTGRAY,
         );
         draw_inventory(&inventory);
+        draw_vitals(health, stamina, hunger);
         if crafting_open {
             draw_crafting_panel(&inventory, crafted_kits);
         }
@@ -372,6 +382,26 @@ fn draw_inventory(inventory: &[InventoryStack]) {
         text.push_str(&format!(" {name} {}", stack.quantity));
     }
     draw_text(&text, 24.0, screen_height() - 48.0, 18.0, LIGHTGRAY);
+}
+
+fn draw_vitals(health: f32, stamina: f32, hunger: f32) {
+    let x = screen_width() - 220.0;
+    draw_stat_bar(x, 28.0, "Health", health, RED);
+    draw_stat_bar(x, 52.0, "Stamina", stamina, GREEN);
+    draw_stat_bar(x, 76.0, "Hunger", hunger, GOLD);
+}
+
+fn draw_stat_bar(x: f32, y: f32, label: &str, value: f32, color: Color) {
+    let width = 190.0;
+    draw_text(label, x, y + 14.0, 16.0, WHITE);
+    draw_rectangle(x + 58.0, y, width - 58.0, 14.0, DARKGRAY);
+    draw_rectangle(
+        x + 58.0,
+        y,
+        (width - 58.0) * (value / 100.0).clamp(0.0, 1.0),
+        14.0,
+        color,
+    );
 }
 
 fn draw_crafting_panel(inventory: &[InventoryStack], crafted_kits: u16) {

@@ -7,8 +7,9 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_state_with_crafting, ClientMessage, CraftRecipe,
-    InventoryStack, PlayerId, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot,
+    decode_client_message, encode_server_state_with_crafting_and_vitals, ClientMessage,
+    CraftRecipe, InventoryStack, PlayerId, PlayerInput, PlayerSnapshot, PlayerVitals, ResourceKind,
+    ResourceSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -25,6 +26,10 @@ const RESOURCE_GATHER_AMOUNT: u16 = 1;
 const MAX_STACK: u16 = 20;
 const CAMP_KIT_WOOD_COST: u16 = 3;
 const CAMP_KIT_STONE_COST: u16 = 2;
+const STAMINA_DRAIN_PER_SECOND: f32 = 18.0;
+const STAMINA_REGEN_PER_SECOND: f32 = 12.0;
+const HUNGER_DECAY_PER_SECOND: f32 = 0.5;
+const STARVATION_DAMAGE_PER_SECOND: f32 = 4.0;
 
 #[derive(Debug)]
 struct PlayerState {
@@ -34,6 +39,7 @@ struct PlayerState {
     y: f32,
     health: f32,
     stamina: f32,
+    hunger: f32,
     input: PlayerInput,
     sequence: u32,
     inventory: [u16; 3],
@@ -175,6 +181,7 @@ async fn main() {
                         y: character.y,
                         health: character.health,
                         stamina: character.stamina,
+                        hunger: character.hunger,
                         input: PlayerInput::default(),
                         sequence,
                         inventory,
@@ -241,6 +248,19 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
+                ClientMessage::Consume { sequence, kind } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        continue;
+                    }
+                    player.sequence = sequence;
+                    consume_item(player, kind);
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 
@@ -248,6 +268,7 @@ async fn main() {
             _ = ticker.tick() => {
                 disconnect_expired_players(&mut players, &mut presence, &database).await;
                 advance_players(&mut players, config.tick_duration_seconds());
+                update_survival(&mut players, config.tick_duration_seconds());
                 send_snapshots(&socket, &players, &resources);
 
                 if Instant::now() >= next_save {
@@ -259,6 +280,7 @@ async fn main() {
                                 player.y,
                                 player.health,
                                 player.stamina,
+                                player.hunger,
                             )
                             .await
                         {
@@ -299,13 +321,28 @@ fn advance_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>, del
     for player in players.values_mut() {
         let length = f32::from(player.input.move_x).hypot(f32::from(player.input.move_y));
         if length == 0.0 {
+            player.stamina = (player.stamina + STAMINA_REGEN_PER_SECOND * delta_seconds).min(100.0);
+            continue;
+        }
+        if player.stamina <= 0.0 {
+            player.stamina = (player.stamina + STAMINA_REGEN_PER_SECOND * delta_seconds).min(100.0);
             continue;
         }
 
+        player.stamina = (player.stamina - STAMINA_DRAIN_PER_SECOND * delta_seconds).max(0.0);
         player.x = (player.x + f32::from(player.input.move_x) / length * SPEED * delta_seconds)
             .clamp(WORLD_MIN, WORLD_MAX);
         player.y = (player.y + f32::from(player.input.move_y) / length * SPEED * delta_seconds)
             .clamp(WORLD_MIN, WORLD_MAX);
+    }
+}
+
+fn update_survival(players: &mut HashMap<std::net::SocketAddr, PlayerState>, delta_seconds: f32) {
+    for player in players.values_mut() {
+        player.hunger = (player.hunger - HUNGER_DECAY_PER_SECOND * delta_seconds).max(0.0);
+        if player.hunger == 0.0 {
+            player.health = (player.health - STARVATION_DAMAGE_PER_SECOND * delta_seconds).max(0.0);
+        }
     }
 }
 
@@ -335,13 +372,18 @@ fn send_snapshots(
             })
             .collect::<Vec<_>>();
         let inventory = inventory_stacks(player.inventory);
-        let packet = encode_server_state_with_crafting(
+        let packet = encode_server_state_with_crafting_and_vitals(
             player.sequence,
             player.id,
             &snapshots,
             &resource_snapshots,
             &inventory,
             player.crafted_kits,
+            PlayerVitals {
+                health: player.health,
+                stamina: player.stamina,
+                hunger: player.hunger,
+            },
         );
         let _ = socket.send_to(&packet, address);
     }
@@ -435,6 +477,14 @@ fn craft_recipe(player: &mut PlayerState, recipe: CraftRecipe) {
     }
 }
 
+fn consume_item(player: &mut PlayerState, kind: ResourceKind) {
+    if kind != ResourceKind::Berries || player.inventory[2] == 0 {
+        return;
+    }
+    player.inventory[2] -= 1;
+    player.hunger = (player.hunger + 25.0).min(100.0);
+}
+
 fn redact_database_url(database_url: &str) -> String {
     let Some(at) = database_url.rfind('@') else {
         return "configured".to_owned();
@@ -488,6 +538,7 @@ async fn disconnect_expired_players(
                             player.y,
                             player.health,
                             player.stamina,
+                            player.hunger,
                         )
                         .await
                     {

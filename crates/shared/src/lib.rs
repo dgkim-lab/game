@@ -43,6 +43,23 @@ pub struct PlayerSnapshot {
     pub y: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerVitals {
+    pub health: f32,
+    pub stamina: f32,
+    pub hunger: f32,
+}
+
+impl Default for PlayerVitals {
+    fn default() -> Self {
+        Self {
+            health: 100.0,
+            stamina: 100.0,
+            hunger: 100.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ResourceKind {
@@ -104,6 +121,7 @@ pub enum MessageType {
     ClientAuthenticate = 3,
     ClientInteract = 4,
     ClientCraft = 5,
+    ClientConsume = 6,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -116,6 +134,7 @@ impl TryFrom<u8> for MessageType {
             3 => Ok(Self::ClientAuthenticate),
             4 => Ok(Self::ClientInteract),
             5 => Ok(Self::ClientCraft),
+            6 => Ok(Self::ClientConsume),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
@@ -127,6 +146,7 @@ pub enum ClientMessage {
     Authenticate { sequence: u32, token: String },
     Interact { sequence: u32, resource_id: u32 },
     Craft { sequence: u32, recipe: CraftRecipe },
+    Consume { sequence: u32, kind: ResourceKind },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +157,7 @@ pub struct ServerMessage {
     pub resources: Vec<ResourceSnapshot>,
     pub inventory: Vec<InventoryStack>,
     pub crafted_kits: u16,
+    pub vitals: PlayerVitals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +281,10 @@ pub fn encode_client_craft(sequence: u32, recipe: CraftRecipe) -> Vec<u8> {
     encode_message(MessageType::ClientCraft, sequence, &[recipe as u8])
 }
 
+pub fn encode_client_consume(sequence: u32, kind: ResourceKind) -> Vec<u8> {
+    encode_message(MessageType::ClientConsume, sequence, &[kind as u8])
+}
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
     let (message_type, sequence, payload) = decode_message(bytes)?;
     match message_type {
@@ -298,6 +323,15 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
                 recipe: CraftRecipe::try_from(payload[0])?,
             })
         }
+        MessageType::ClientConsume => {
+            if payload.len() != 1 {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Consume {
+                sequence,
+                kind: ResourceKind::try_from(payload[0])?,
+            })
+        }
         MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
 }
@@ -317,7 +351,15 @@ pub fn encode_server_state(
     resources: &[ResourceSnapshot],
     inventory: &[InventoryStack],
 ) -> Vec<u8> {
-    encode_server_state_with_crafting(sequence, player_id, snapshots, resources, inventory, 0)
+    encode_server_state_with_crafting_and_vitals(
+        sequence,
+        player_id,
+        snapshots,
+        resources,
+        inventory,
+        0,
+        PlayerVitals::default(),
+    )
 }
 
 pub fn encode_server_state_with_crafting(
@@ -327,6 +369,26 @@ pub fn encode_server_state_with_crafting(
     resources: &[ResourceSnapshot],
     inventory: &[InventoryStack],
     crafted_kits: u16,
+) -> Vec<u8> {
+    encode_server_state_with_crafting_and_vitals(
+        sequence,
+        player_id,
+        snapshots,
+        resources,
+        inventory,
+        crafted_kits,
+        PlayerVitals::default(),
+    )
+}
+
+pub fn encode_server_state_with_crafting_and_vitals(
+    sequence: u32,
+    player_id: PlayerId,
+    snapshots: &[PlayerSnapshot],
+    resources: &[ResourceSnapshot],
+    inventory: &[InventoryStack],
+    crafted_kits: u16,
+    vitals: PlayerVitals,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
         12 + snapshots.len() * PlayerSnapshot::BYTE_LEN
@@ -343,6 +405,9 @@ pub fn encode_server_state_with_crafting(
         stack.encode(&mut payload);
     }
     payload.extend_from_slice(&crafted_kits.to_le_bytes());
+    payload.extend_from_slice(&vitals.health.to_le_bytes());
+    payload.extend_from_slice(&vitals.stamina.to_le_bytes());
+    payload.extend_from_slice(&vitals.hunger.to_le_bytes());
     for snapshot in snapshots {
         payload.extend_from_slice(&snapshot.encode());
     }
@@ -371,6 +436,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
             .map_err(|_| DecodeError::InvalidPayload)?,
     ));
     offset += 2;
+
     let resources_end = offset + resource_count * ResourceSnapshot::BYTE_LEN;
     if resources_end > payload.len() {
         return Err(DecodeError::InvalidPayload);
@@ -410,6 +476,28 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
     );
     offset += 2;
 
+    if offset + 12 > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let vitals = PlayerVitals {
+        health: f32::from_le_bytes(
+            payload[offset..offset + 4]
+                .try_into()
+                .map_err(|_| DecodeError::InvalidPayload)?,
+        ),
+        stamina: f32::from_le_bytes(
+            payload[offset + 4..offset + 8]
+                .try_into()
+                .map_err(|_| DecodeError::InvalidPayload)?,
+        ),
+        hunger: f32::from_le_bytes(
+            payload[offset + 8..offset + 12]
+                .try_into()
+                .map_err(|_| DecodeError::InvalidPayload)?,
+        ),
+    };
+    offset += 12;
+
     if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
         return Err(DecodeError::InvalidPayload);
     }
@@ -425,6 +513,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         resources,
         inventory,
         crafted_kits,
+        vitals,
     })
 }
 
@@ -537,6 +626,20 @@ mod tests {
             ClientMessage::Craft {
                 sequence: 45,
                 recipe: CraftRecipe::CampKit,
+            }
+        );
+    }
+
+    #[test]
+    fn client_consume_round_trips_through_versioned_envelope() {
+        let packet = encode_client_consume(46, ResourceKind::Berries);
+        let decoded = decode_client_message(&packet).expect("valid consume packet");
+
+        assert_eq!(
+            decoded,
+            ClientMessage::Consume {
+                sequence: 46,
+                kind: ResourceKind::Berries,
             }
         );
     }

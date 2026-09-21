@@ -8,6 +8,7 @@ pub struct CharacterState {
     pub y: f32,
     pub health: f32,
     pub stamina: f32,
+    pub hunger: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +118,7 @@ impl Database {
         account_id: i64,
     ) -> Result<Option<CharacterState>, sqlx::Error> {
         let character = sqlx::query(
-            "SELECT id, position_x, position_y, health, stamina
+            "SELECT id, position_x, position_y, health, stamina, hunger
              FROM characters
              WHERE account_id = $1
              ORDER BY id
@@ -135,6 +136,7 @@ impl Database {
                     y: row.try_get("position_y")?,
                     health: row.try_get("health")?,
                     stamina: row.try_get("stamina")?,
+                    hunger: row.try_get("hunger")?,
                 })
             })
             .transpose()
@@ -148,16 +150,18 @@ impl Database {
         y: f32,
         health: f32,
         stamina: f32,
+        hunger: f32,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE characters
-             SET position_x = $1, position_y = $2, health = $3, stamina = $4, updated_at = now()
-             WHERE id = $5",
+             SET position_x = $1, position_y = $2, health = $3, stamina = $4, hunger = $5, updated_at = now()
+             WHERE id = $6",
         )
         .bind(x)
         .bind(y)
         .bind(health)
         .bind(stamina)
+        .bind(hunger)
         .bind(character_id)
         .execute(&self.pool)
         .await?;
