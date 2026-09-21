@@ -61,8 +61,13 @@ curl -X POST http://127.0.0.1:8080/auth/login \
   -d '{"username":"pilot1","password":"correct horse battery staple"}'
 ```
 
-Signup and login return a Redis-backed session token. The client currently accepts that
-token through `GAME_SESSION_TOKEN` and sends it in the UDP authentication handshake:
+The client now displays a login screen after loading the world asset. Use the keyboard
+to enter credentials, `Tab` to switch fields, `Enter` to submit, and `F2` to switch
+between login and signup. The returned Redis-backed session token is kept in memory and
+sent in the UDP authentication handshake.
+
+For automated or headless testing, the client also accepts a token through
+`GAME_SESSION_TOKEN`:
 
 ```bash
 GAME_SESSION_TOKEN=<token-from-signup-or-login> cargo run -p frontier-client

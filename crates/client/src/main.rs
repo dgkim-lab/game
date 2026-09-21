@@ -13,7 +13,20 @@ use std::{
 
 const SERVER_ADDRESS: &str = "127.0.0.1:4000";
 const ASSET_SERVER_ADDRESS: &str = "127.0.0.1:4100";
+const AUTH_API_ADDRESS: &str = "127.0.0.1:8080";
 const WORLD_SIZE: f32 = 800.0;
+
+#[derive(Clone, Copy)]
+enum AuthMode {
+    Login,
+    Signup,
+}
+
+#[derive(Clone, Copy)]
+enum AuthField {
+    Username,
+    Password,
+}
 
 #[macroquad::main("Frontier Echoes")]
 async fn main() {
@@ -31,8 +44,14 @@ async fn main() {
     let mut other_players = Vec::new();
     let mut receive_buffer = [0; 256];
     let mut sequence = 0;
-    let session_token = std::env::var("GAME_SESSION_TOKEN").unwrap_or_default();
+    let mut session_token = std::env::var("GAME_SESSION_TOKEN").unwrap_or_default();
     let mut authenticated = false;
+    let mut username = String::new();
+    let mut password = String::new();
+    let mut auth_mode = AuthMode::Login;
+    let mut auth_field = AuthField::Username;
+    let mut auth_error = None;
+    let mut auth_receiver: Option<Receiver<Result<String, String>>> = None;
 
     loop {
         if world.is_none() {
@@ -40,9 +59,11 @@ async fn main() {
                 Ok(Ok(asset)) => {
                     world = Some(asset);
                     asset_error = None;
-                    match connect_game_socket() {
-                        Ok(new_socket) => socket = Some(new_socket),
-                        Err(error) => game_error = Some(error),
+                    if !session_token.is_empty() {
+                        match connect_game_socket() {
+                            Ok(new_socket) => socket = Some(new_socket),
+                            Err(error) => game_error = Some(error),
+                        }
                     }
                 }
                 Ok(Err(error)) => asset_error = Some(error),
@@ -63,6 +84,52 @@ async fn main() {
             }
             next_frame().await;
             continue;
+        }
+
+        if socket.is_none() && session_token.is_empty() {
+            if let Some(receiver) = auth_receiver.as_ref() {
+                match receiver.try_recv() {
+                    Ok(Ok(token)) => {
+                        session_token = token;
+                        auth_receiver = None;
+                        auth_error = None;
+                        match connect_game_socket() {
+                            Ok(new_socket) => socket = Some(new_socket),
+                            Err(error) => game_error = Some(error),
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        auth_error = Some(error);
+                        auth_receiver = None;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        auth_error = Some("authentication request stopped unexpectedly".to_owned());
+                        auth_receiver = None;
+                    }
+                }
+            }
+
+            if socket.is_none() {
+                handle_login_input(
+                    &mut username,
+                    &mut password,
+                    &mut auth_field,
+                    &mut auth_mode,
+                    &mut auth_receiver,
+                    &mut auth_error,
+                );
+                draw_login_screen(
+                    &username,
+                    &password,
+                    auth_field,
+                    auth_mode,
+                    auth_error.as_deref(),
+                    auth_receiver.is_some(),
+                );
+                next_frame().await;
+                continue;
+            }
         }
 
         let connection_lost = last_server_response
@@ -227,6 +294,186 @@ fn draw_asset_error(error: &str) {
     );
     draw_text("Press R to retry", 300.0, 315.0, 20.0, WHITE);
     draw_text(error, 40.0, 370.0, 16.0, LIGHTGRAY);
+}
+
+fn handle_login_input(
+    username: &mut String,
+    password: &mut String,
+    field: &mut AuthField,
+    mode: &mut AuthMode,
+    receiver: &mut Option<Receiver<Result<String, String>>>,
+    error: &mut Option<String>,
+) {
+    if is_key_pressed(KeyCode::Tab) {
+        *field = match field {
+            AuthField::Username => AuthField::Password,
+            AuthField::Password => AuthField::Username,
+        };
+    }
+    if is_key_pressed(KeyCode::F2) {
+        *mode = match mode {
+            AuthMode::Login => AuthMode::Signup,
+            AuthMode::Signup => AuthMode::Login,
+        };
+        *error = None;
+    }
+    if is_key_pressed(KeyCode::Backspace) {
+        match field {
+            AuthField::Username => {
+                username.pop();
+            }
+            AuthField::Password => {
+                password.pop();
+            }
+        }
+    }
+    while let Some(character) = get_char_pressed() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ' ' | '.') {
+            match field {
+                AuthField::Username => username.push(character),
+                AuthField::Password => password.push(character),
+            }
+            *error = None;
+        }
+    }
+    if is_key_pressed(KeyCode::Enter) && receiver.is_none() {
+        let action = match mode {
+            AuthMode::Login => AuthAction::Login,
+            AuthMode::Signup => AuthAction::Signup,
+        };
+        *receiver = Some(spawn_auth_request(
+            action,
+            username.clone(),
+            password.clone(),
+        ));
+    }
+}
+
+fn draw_login_screen(
+    username: &str,
+    password: &str,
+    field: AuthField,
+    mode: AuthMode,
+    error: Option<&str>,
+    busy: bool,
+) {
+    clear_background(Color::from_rgba(17, 29, 39, 255));
+    draw_text("FRONTIER ECHOES", 250.0, 120.0, 36.0, WHITE);
+    draw_text(
+        match mode {
+            AuthMode::Login => "Sign in",
+            AuthMode::Signup => "Create account",
+        },
+        320.0,
+        185.0,
+        28.0,
+        SKYBLUE,
+    );
+    draw_text("Username", 230.0, 245.0, 20.0, LIGHTGRAY);
+    draw_text(username, 230.0, 275.0, 22.0, WHITE);
+    draw_line(
+        230.0,
+        282.0,
+        570.0,
+        282.0,
+        2.0,
+        if matches!(field, AuthField::Username) {
+            SKYBLUE
+        } else {
+            GRAY
+        },
+    );
+    draw_text("Password", 230.0, 330.0, 20.0, LIGHTGRAY);
+    draw_text(
+        &"•".repeat(password.chars().count()),
+        230.0,
+        360.0,
+        22.0,
+        WHITE,
+    );
+    draw_line(
+        230.0,
+        367.0,
+        570.0,
+        367.0,
+        2.0,
+        if matches!(field, AuthField::Password) {
+            SKYBLUE
+        } else {
+            GRAY
+        },
+    );
+    draw_text(
+        "Tab: switch field   Enter: submit   F2: switch login/signup",
+        180.0,
+        430.0,
+        16.0,
+        LIGHTGRAY,
+    );
+    if busy {
+        draw_text("Contacting account service...", 270.0, 475.0, 18.0, SKYBLUE);
+    }
+    if let Some(error) = error {
+        draw_text(error, 160.0, 510.0, 18.0, ORANGE);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AuthAction {
+    Login,
+    Signup,
+}
+
+fn spawn_auth_request(
+    action: AuthAction,
+    username: String,
+    password: String,
+) -> Receiver<Result<String, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = authenticate(action, &username, &password);
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn authenticate(action: AuthAction, username: &str, password: &str) -> Result<String, String> {
+    let path = match action {
+        AuthAction::Login => "/auth/login",
+        AuthAction::Signup => "/auth/signup",
+    };
+    let body = serde_json::json!({ "username": username, "password": password }).to_string();
+    let mut stream = TcpStream::connect(AUTH_API_ADDRESS).map_err(|error| error.to_string())?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: frontier-auth\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| error.to_string())?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "invalid authentication response".to_owned())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "authentication response was not valid UTF-8".to_owned())?;
+    let body = &response[header_end + 4..];
+    let json: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| "authentication service returned invalid JSON".to_owned())?;
+    if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.1 201") {
+        return Err(json["error"]
+            .as_str()
+            .unwrap_or("authentication failed")
+            .to_owned());
+    }
+    json["token"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "authentication response did not include a session token".to_owned())
 }
 
 fn spawn_asset_download() -> Receiver<Result<WorldAsset, String>> {
