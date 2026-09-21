@@ -8,8 +8,8 @@ use config::Config;
 use database::Database;
 use frontier_shared::{
     decode_client_message, encode_server_state_with_crafting_and_vitals, ClientMessage,
-    CraftRecipe, InventoryStack, PlayerId, PlayerInput, PlayerSnapshot, PlayerVitals, ResourceKind,
-    ResourceSnapshot,
+    CraftRecipe, EnemySnapshot, InventoryStack, PlayerId, PlayerInput, PlayerSnapshot,
+    PlayerVitals, ResourceKind, ResourceSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -30,6 +30,12 @@ const STAMINA_DRAIN_PER_SECOND: f32 = 18.0;
 const STAMINA_REGEN_PER_SECOND: f32 = 12.0;
 const HUNGER_DECAY_PER_SECOND: f32 = 0.5;
 const STARVATION_DAMAGE_PER_SECOND: f32 = 4.0;
+const ENEMY_SPEED: f32 = 55.0;
+const ENEMY_ATTACK_DISTANCE: f32 = 30.0;
+const ENEMY_ATTACK_DAMAGE: f32 = 12.0;
+const ENEMY_ATTACK_COOLDOWN: f32 = 1.0;
+const PLAYER_ATTACK_DISTANCE: f32 = 58.0;
+const PLAYER_ATTACK_DAMAGE: f32 = 25.0;
 
 #[derive(Debug)]
 struct PlayerState {
@@ -53,6 +59,15 @@ struct ResourceNode {
     x: f32,
     y: f32,
     remaining: u16,
+}
+
+#[derive(Debug)]
+struct EnemyState {
+    id: u32,
+    x: f32,
+    y: f32,
+    health: f32,
+    attack_cooldown: f32,
 }
 
 #[tokio::main]
@@ -128,6 +143,7 @@ async fn main() {
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
     let mut resources = initial_resources();
+    let mut enemies = initial_enemies();
     let mut buffer = [0; 256];
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
@@ -261,6 +277,19 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
+                ClientMessage::Attack { sequence } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        continue;
+                    }
+                    player.sequence = sequence;
+                    attack_enemy(player, &mut enemies);
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 
@@ -269,7 +298,9 @@ async fn main() {
                 disconnect_expired_players(&mut players, &mut presence, &database).await;
                 advance_players(&mut players, config.tick_duration_seconds());
                 update_survival(&mut players, config.tick_duration_seconds());
-                send_snapshots(&socket, &players, &resources);
+                update_enemies(&mut enemies, &mut players, config.tick_duration_seconds());
+                respawn_dead_players(&mut players);
+                send_snapshots(&socket, &players, &resources, &enemies);
 
                 if Instant::now() >= next_save {
                     for player in players.values() {
@@ -346,10 +377,91 @@ fn update_survival(players: &mut HashMap<std::net::SocketAddr, PlayerState>, del
     }
 }
 
+fn initial_enemies() -> Vec<EnemyState> {
+    vec![EnemyState {
+        id: 1,
+        x: 650.0,
+        y: 220.0,
+        health: 100.0,
+        attack_cooldown: 0.0,
+    }]
+}
+
+fn update_enemies(
+    enemies: &mut [EnemyState],
+    players: &mut HashMap<std::net::SocketAddr, PlayerState>,
+    delta_seconds: f32,
+) {
+    for enemy in enemies {
+        enemy.attack_cooldown = (enemy.attack_cooldown - delta_seconds).max(0.0);
+        let Some((target_address, target_x, target_y, distance)) = players
+            .iter()
+            .filter(|(_, player)| player.health > 0.0)
+            .map(|(address, player)| {
+                (
+                    *address,
+                    player.x,
+                    player.y,
+                    (player.x - enemy.x).hypot(player.y - enemy.y),
+                )
+            })
+            .min_by(|left, right| left.3.total_cmp(&right.3))
+        else {
+            continue;
+        };
+
+        if distance <= ENEMY_ATTACK_DISTANCE {
+            if enemy.attack_cooldown == 0.0 {
+                if let Some(player) = players.get_mut(&target_address) {
+                    player.health = (player.health - ENEMY_ATTACK_DAMAGE).max(0.0);
+                }
+                enemy.attack_cooldown = ENEMY_ATTACK_COOLDOWN;
+            }
+        } else if distance > 0.0 {
+            enemy.x = (enemy.x + (target_x - enemy.x) / distance * ENEMY_SPEED * delta_seconds)
+                .clamp(WORLD_MIN, WORLD_MAX);
+            enemy.y = (enemy.y + (target_y - enemy.y) / distance * ENEMY_SPEED * delta_seconds)
+                .clamp(WORLD_MIN, WORLD_MAX);
+        }
+    }
+}
+
+fn attack_enemy(player: &PlayerState, enemies: &mut Vec<EnemyState>) {
+    let Some((index, distance)) = enemies
+        .iter()
+        .enumerate()
+        .filter(|(_, enemy)| enemy.health > 0.0)
+        .map(|(index, enemy)| (index, (player.x - enemy.x).hypot(player.y - enemy.y)))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+    else {
+        return;
+    };
+    if distance <= PLAYER_ATTACK_DISTANCE {
+        enemies[index].health = (enemies[index].health - PLAYER_ATTACK_DAMAGE).max(0.0);
+        enemies.retain(|enemy| enemy.health > 0.0);
+    }
+}
+
+fn respawn_dead_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>) {
+    for player in players.values_mut() {
+        if player.health > 0.0 {
+            continue;
+        }
+        info!(player_id = player.id, "player defeated; respawning");
+        player.x = 400.0;
+        player.y = 300.0;
+        player.health = 100.0;
+        player.stamina = 100.0;
+        player.hunger = 100.0;
+        player.input = PlayerInput::default();
+    }
+}
+
 fn send_snapshots(
     socket: &UdpSocket,
     players: &HashMap<std::net::SocketAddr, PlayerState>,
     resources: &[ResourceNode],
+    enemies: &[EnemyState],
 ) {
     let snapshots = players
         .values()
@@ -372,6 +484,15 @@ fn send_snapshots(
             })
             .collect::<Vec<_>>();
         let inventory = inventory_stacks(player.inventory);
+        let enemy_snapshots = enemies
+            .iter()
+            .map(|enemy| EnemySnapshot {
+                enemy_id: enemy.id,
+                x: enemy.x,
+                y: enemy.y,
+                health: enemy.health,
+            })
+            .collect::<Vec<_>>();
         let packet = encode_server_state_with_crafting_and_vitals(
             player.sequence,
             player.id,
@@ -384,6 +505,7 @@ fn send_snapshots(
                 stamina: player.stamina,
                 hunger: player.hunger,
             },
+            &enemy_snapshots,
         );
         let _ = socket.send_to(&packet, address);
     }

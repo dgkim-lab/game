@@ -1,7 +1,7 @@
 use frontier_shared::{
-    decode_server_message, encode_client_authenticate, encode_client_consume, encode_client_craft,
-    encode_client_input, encode_client_interact, CraftRecipe, InventoryStack, PlayerInput,
-    PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
+    decode_server_message, encode_client_attack, encode_client_authenticate, encode_client_consume,
+    encode_client_craft, encode_client_input, encode_client_interact, CraftRecipe, EnemySnapshot,
+    InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -64,6 +64,7 @@ async fn main() {
     let mut other_players = Vec::new();
     let mut resources: Vec<ResourceSnapshot> = Vec::new();
     let mut inventory: Vec<InventoryStack> = Vec::new();
+    let mut enemies: Vec<EnemySnapshot> = Vec::new();
     let mut crafted_kits = 0;
     let mut crafting_open = false;
     let mut health = 100.0;
@@ -186,7 +187,9 @@ async fn main() {
             crafting_open = !crafting_open;
         }
         if let Some(socket) = socket.as_ref() {
-            let packet = if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
+            let packet = if authenticated && is_key_pressed(KeyCode::Space) {
+                encode_client_attack(sequence)
+            } else if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
                 encode_client_craft(sequence, CraftRecipe::CampKit)
             } else if authenticated && is_key_pressed(KeyCode::F) {
                 encode_client_consume(sequence, ResourceKind::Berries)
@@ -224,6 +227,7 @@ async fn main() {
                     resources = message.resources;
                     inventory = message.inventory;
                     crafted_kits = message.crafted_kits;
+                    enemies = message.enemies;
                     health = message.vitals.health;
                     stamina = message.vitals.stamina;
                     hunger = message.vitals.hunger;
@@ -246,6 +250,7 @@ async fn main() {
         clear_background(color(world.background));
         draw_world(world);
         draw_resources(&resources, player);
+        draw_enemies(&enemies);
         for other in &other_players {
             if other.player_id != player.player_id {
                 draw_circle(other.x, other.y, 14.0, ORANGE);
@@ -260,10 +265,11 @@ async fn main() {
         draw_text("WASD  Move", 24.0, 62.0, 20.0, LIGHTGRAY);
         draw_text("E  Gather nearby resource", 24.0, 86.0, 18.0, LIGHTGRAY);
         draw_text("C  Craft    F  Eat berries", 24.0, 110.0, 18.0, LIGHTGRAY);
+        draw_text("Space  Attack", 24.0, 134.0, 18.0, LIGHTGRAY);
         draw_text(
             &format!("Players online: {}", other_players.len()),
             24.0,
-            136.0,
+            160.0,
             18.0,
             LIGHTGRAY,
         );
@@ -277,7 +283,7 @@ async fn main() {
         } else {
             GREEN
         };
-        draw_text(connection_text, 24.0, 160.0, 18.0, connection_color);
+        draw_text(connection_text, 24.0, 184.0, 18.0, connection_color);
         draw_text(
             &format!(
                 "Player {}  ({:.0}, {:.0})",
@@ -368,6 +374,21 @@ fn draw_resources(resources: &[ResourceSnapshot], player: PlayerSnapshot) {
         if (player.x - resource.x).hypot(player.y - resource.y) <= 64.0 {
             draw_text("E", resource.x - 5.0, resource.y - 18.0, 16.0, YELLOW);
         }
+    }
+}
+
+fn draw_enemies(enemies: &[EnemySnapshot]) {
+    for enemy in enemies {
+        draw_circle(enemy.x, enemy.y, 17.0, MAROON);
+        draw_circle_lines(enemy.x, enemy.y, 17.0, 2.0, WHITE);
+        draw_rectangle(enemy.x - 20.0, enemy.y - 28.0, 40.0, 5.0, DARKGRAY);
+        draw_rectangle(
+            enemy.x - 20.0,
+            enemy.y - 28.0,
+            40.0 * (enemy.health / 100.0).clamp(0.0, 1.0),
+            5.0,
+            RED,
+        );
     }
 }
 

@@ -109,4 +109,5 @@ or berries. Press `F` to eat one berry and restore hunger. Press `C` to open the
 panel and `Enter` to craft a camp kit when you have enough materials. The server validates movement, interactions, and crafting,
 then sends authoritative positions, resource counts, and inventory stacks back to the client.
 Movement consumes stamina, hunger decreases over time, and starvation damages health;
-these survival values are persisted with the character.
+these survival values are persisted with the character. A hostile creature chases nearby
+players; press `Space` to attack it. Defeated players respawn at the safe starting point.

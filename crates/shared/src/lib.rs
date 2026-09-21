@@ -50,6 +50,37 @@ pub struct PlayerVitals {
     pub hunger: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnemySnapshot {
+    pub enemy_id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub health: f32,
+}
+
+impl EnemySnapshot {
+    pub const BYTE_LEN: usize = 16;
+
+    fn encode(self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&self.enemy_id.to_le_bytes());
+        bytes.extend_from_slice(&self.x.to_le_bytes());
+        bytes.extend_from_slice(&self.y.to_le_bytes());
+        bytes.extend_from_slice(&self.health.to_le_bytes());
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTE_LEN {
+            return None;
+        }
+        Some(Self {
+            enemy_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            x: f32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            y: f32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            health: f32::from_le_bytes(bytes[12..16].try_into().ok()?),
+        })
+    }
+}
+
 impl Default for PlayerVitals {
     fn default() -> Self {
         Self {
@@ -122,6 +153,7 @@ pub enum MessageType {
     ClientInteract = 4,
     ClientCraft = 5,
     ClientConsume = 6,
+    ClientAttack = 7,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -135,6 +167,7 @@ impl TryFrom<u8> for MessageType {
             4 => Ok(Self::ClientInteract),
             5 => Ok(Self::ClientCraft),
             6 => Ok(Self::ClientConsume),
+            7 => Ok(Self::ClientAttack),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
@@ -147,6 +180,7 @@ pub enum ClientMessage {
     Interact { sequence: u32, resource_id: u32 },
     Craft { sequence: u32, recipe: CraftRecipe },
     Consume { sequence: u32, kind: ResourceKind },
+    Attack { sequence: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +192,7 @@ pub struct ServerMessage {
     pub inventory: Vec<InventoryStack>,
     pub crafted_kits: u16,
     pub vitals: PlayerVitals,
+    pub enemies: Vec<EnemySnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +320,10 @@ pub fn encode_client_consume(sequence: u32, kind: ResourceKind) -> Vec<u8> {
     encode_message(MessageType::ClientConsume, sequence, &[kind as u8])
 }
 
+pub fn encode_client_attack(sequence: u32) -> Vec<u8> {
+    encode_message(MessageType::ClientAttack, sequence, &[])
+}
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
     let (message_type, sequence, payload) = decode_message(bytes)?;
     match message_type {
@@ -332,6 +371,12 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
                 kind: ResourceKind::try_from(payload[0])?,
             })
         }
+        MessageType::ClientAttack => {
+            if !payload.is_empty() {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Attack { sequence })
+        }
         MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
 }
@@ -359,6 +404,7 @@ pub fn encode_server_state(
         inventory,
         0,
         PlayerVitals::default(),
+        &[],
     )
 }
 
@@ -378,6 +424,7 @@ pub fn encode_server_state_with_crafting(
         inventory,
         crafted_kits,
         PlayerVitals::default(),
+        &[],
     )
 }
 
@@ -389,6 +436,7 @@ pub fn encode_server_state_with_crafting_and_vitals(
     inventory: &[InventoryStack],
     crafted_kits: u16,
     vitals: PlayerVitals,
+    enemies: &[EnemySnapshot],
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
         12 + snapshots.len() * PlayerSnapshot::BYTE_LEN
@@ -408,6 +456,10 @@ pub fn encode_server_state_with_crafting_and_vitals(
     payload.extend_from_slice(&vitals.health.to_le_bytes());
     payload.extend_from_slice(&vitals.stamina.to_le_bytes());
     payload.extend_from_slice(&vitals.hunger.to_le_bytes());
+    payload.extend_from_slice(&(enemies.len() as u16).to_le_bytes());
+    for enemy in enemies {
+        enemy.encode(&mut payload);
+    }
     for snapshot in snapshots {
         payload.extend_from_slice(&snapshot.encode());
     }
@@ -498,6 +550,25 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
     };
     offset += 12;
 
+    if offset + 2 > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let enemy_count = usize::from(u16::from_le_bytes(
+        payload[offset..offset + 2]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    ));
+    offset += 2;
+    let enemies_end = offset + enemy_count * EnemySnapshot::BYTE_LEN;
+    if enemies_end > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let enemies = payload[offset..enemies_end]
+        .chunks_exact(EnemySnapshot::BYTE_LEN)
+        .map(|chunk| EnemySnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
+        .collect::<Result<Vec<_>, _>>()?;
+    offset = enemies_end;
+
     if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
         return Err(DecodeError::InvalidPayload);
     }
@@ -514,6 +585,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         inventory,
         crafted_kits,
         vitals,
+        enemies,
     })
 }
 

@@ -38,8 +38,8 @@ Goal: a player can gather, craft, and survive for a short session.
 - [x] Inventory with item stack limits
 - [x] Crafting recipes and a simple crafting panel
 - [x] Health, stamina, hunger, and damage
-- [ ] One hostile creature with basic AI
-- [ ] Respawn at a safe starting location
+- [x] One hostile creature with basic AI
+- [x] Respawn at a safe starting location
 
 Acceptance criteria: a new player can gather resources, craft a tool, defeat one enemy,
 and recover after death.
