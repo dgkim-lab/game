@@ -18,10 +18,10 @@ Goal: two local clients can share a stable small world.
 
 - [x] Server tick loop with explicit fixed timestep
 - [x] Connection IDs, heartbeats, timeout, and disconnect handling
-- [ ] Server snapshots containing all visible players
+- [x] Server snapshots containing all visible players
 - [ ] Client interpolation for remote players
 - [ ] Input validation and movement speed limits
-- [ ] Nearby-player replication and broadcast fan-out
+- [x] Nearby-player replication and broadcast fan-out
 - [ ] Sequence validation and stale/out-of-order packet rejection
 - [ ] Basic protocol version and message error handling
 - [ ] Integration test for connect, move, snapshot, and disconnect
