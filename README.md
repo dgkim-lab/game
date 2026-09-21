@@ -105,5 +105,6 @@ cargo run -p frontier-client
 ```
 
 Use `W`, `A`, `S`, and `D` to move. Press `E` near a resource node to gather wood, stone,
-or berries. The server validates movement and interactions, then sends authoritative
-positions, resource counts, and inventory stacks back to the client.
+or berries. Press `C` to open the crafting panel and `Enter` to craft a camp kit when
+you have enough materials. The server validates movement, interactions, and crafting,
+then sends authoritative positions, resource counts, and inventory stacks back to the client.

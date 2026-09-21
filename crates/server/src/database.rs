@@ -164,7 +164,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn load_inventory(&self, character_id: i64) -> Result<[u16; 3], sqlx::Error> {
+    pub async fn load_inventory(&self, character_id: i64) -> Result<([u16; 3], u16), sqlx::Error> {
         let rows = sqlx::query(
             "SELECT item_code, quantity
              FROM inventory_items
@@ -174,21 +174,25 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         let mut inventory = [0; 3];
+        let mut crafted_kits = 0;
         for row in rows {
             let item_code: String = row.try_get("item_code")?;
             let quantity: i32 = row.try_get("quantity")?;
-            let Some(slot) = inventory_slot(&item_code) else {
-                continue;
-            };
-            inventory[slot] = quantity.clamp(0, u16::MAX as i32) as u16;
+            let quantity = quantity.clamp(0, u16::MAX as i32) as u16;
+            if item_code == "camp_kit" {
+                crafted_kits = quantity;
+            } else if let Some(slot) = inventory_slot(&item_code) {
+                inventory[slot] = quantity;
+            }
         }
-        Ok(inventory)
+        Ok((inventory, crafted_kits))
     }
 
     pub async fn save_inventory(
         &self,
         character_id: i64,
         inventory: [u16; 3],
+        crafted_kits: u16,
     ) -> Result<(), sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("DELETE FROM inventory_items WHERE character_id = $1")
@@ -207,6 +211,16 @@ impl Database {
             .bind(character_id)
             .bind(inventory_item_code(slot))
             .bind(i32::from(quantity))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        if crafted_kits > 0 {
+            sqlx::query(
+                "INSERT INTO inventory_items (character_id, item_code, quantity)
+                 VALUES ($1, 'camp_kit', $2)",
+            )
+            .bind(character_id)
+            .bind(i32::from(crafted_kits))
             .execute(&mut *transaction)
             .await?;
         }

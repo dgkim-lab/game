@@ -7,8 +7,8 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_state, ClientMessage, InventoryStack, PlayerId,
-    PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot,
+    decode_client_message, encode_server_state_with_crafting, ClientMessage, CraftRecipe,
+    InventoryStack, PlayerId, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -23,6 +23,8 @@ const SPEED: f32 = 180.0;
 const RESOURCE_INTERACTION_DISTANCE: f32 = 64.0;
 const RESOURCE_GATHER_AMOUNT: u16 = 1;
 const MAX_STACK: u16 = 20;
+const CAMP_KIT_WOOD_COST: u16 = 3;
+const CAMP_KIT_STONE_COST: u16 = 2;
 
 #[derive(Debug)]
 struct PlayerState {
@@ -35,6 +37,7 @@ struct PlayerState {
     input: PlayerInput,
     sequence: u32,
     inventory: [u16; 3],
+    crafted_kits: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,12 +161,12 @@ async fn main() {
                         warn!(%address, account_id, "account has no character");
                         continue;
                     };
-                    let inventory = database
+                    let (inventory, crafted_kits) = database
                         .load_inventory(character.id)
                         .await
                         .unwrap_or_else(|error| {
                             error!(%error, character_id = character.id, "could not load character inventory");
-                            [0; 3]
+                            ([0; 3], 0)
                         });
                     let player = PlayerState {
                         id: next_id,
@@ -175,6 +178,7 @@ async fn main() {
                         input: PlayerInput::default(),
                         sequence,
                         inventory,
+                        crafted_kits,
                     };
                     info!(player_id = player.id, account_id, character_id = player.character_id, %address, "player authenticated");
                     presence.refresh(player.id).await.ok();
@@ -224,6 +228,19 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
+                ClientMessage::Craft { sequence, recipe } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        continue;
+                    }
+                    player.sequence = sequence;
+                    craft_recipe(player, recipe);
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 
@@ -248,7 +265,11 @@ async fn main() {
                             error!(character_id = player.character_id, %error, "could not save character");
                         }
                         if let Err(error) = database
-                            .save_inventory(player.character_id, player.inventory)
+                            .save_inventory(
+                                player.character_id,
+                                player.inventory,
+                                player.crafted_kits,
+                            )
                             .await
                         {
                             error!(character_id = player.character_id, %error, "could not save character inventory");
@@ -314,12 +335,13 @@ fn send_snapshots(
             })
             .collect::<Vec<_>>();
         let inventory = inventory_stacks(player.inventory);
-        let packet = encode_server_state(
+        let packet = encode_server_state_with_crafting(
             player.sequence,
             player.id,
             &snapshots,
             &resource_snapshots,
             &inventory,
+            player.crafted_kits,
         );
         let _ = socket.send_to(&packet, address);
     }
@@ -398,6 +420,21 @@ fn inventory_stacks(inventory: [u16; 3]) -> Vec<InventoryStack> {
     .collect()
 }
 
+fn craft_recipe(player: &mut PlayerState, recipe: CraftRecipe) {
+    match recipe {
+        CraftRecipe::CampKit
+            if player.inventory[0] >= CAMP_KIT_WOOD_COST
+                && player.inventory[1] >= CAMP_KIT_STONE_COST
+                && player.crafted_kits < MAX_STACK =>
+        {
+            player.inventory[0] -= CAMP_KIT_WOOD_COST;
+            player.inventory[1] -= CAMP_KIT_STONE_COST;
+            player.crafted_kits += 1;
+        }
+        CraftRecipe::CampKit => {}
+    }
+}
+
 fn redact_database_url(database_url: &str) -> String {
     let Some(at) = database_url.rfind('@') else {
         return "configured".to_owned();
@@ -457,7 +494,7 @@ async fn disconnect_expired_players(
                         error!(character_id = player.character_id, %error, "could not save disconnected player");
                     }
                     if let Err(error) = database
-                        .save_inventory(player.character_id, player.inventory)
+                        .save_inventory(player.character_id, player.inventory, player.crafted_kits)
                         .await
                     {
                         error!(character_id = player.character_id, %error, "could not save disconnected player inventory");

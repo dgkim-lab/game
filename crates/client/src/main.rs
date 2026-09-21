@@ -1,6 +1,7 @@
 use frontier_shared::{
-    decode_server_message, encode_client_authenticate, encode_client_input, encode_client_interact,
-    InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
+    decode_server_message, encode_client_authenticate, encode_client_craft, encode_client_input,
+    encode_client_interact, CraftRecipe, InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind,
+    ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -63,6 +64,8 @@ async fn main() {
     let mut other_players = Vec::new();
     let mut resources: Vec<ResourceSnapshot> = Vec::new();
     let mut inventory: Vec<InventoryStack> = Vec::new();
+    let mut crafted_kits = 0;
+    let mut crafting_open = false;
     let mut receive_buffer = [0; 2048];
     let mut sequence = 0;
     let mut last_frame = Instant::now();
@@ -176,8 +179,13 @@ async fn main() {
             move_x: i8::from(is_key_down(KeyCode::D)) - i8::from(is_key_down(KeyCode::A)),
             move_y: i8::from(is_key_down(KeyCode::S)) - i8::from(is_key_down(KeyCode::W)),
         };
+        if is_key_pressed(KeyCode::C) {
+            crafting_open = !crafting_open;
+        }
         if let Some(socket) = socket.as_ref() {
-            let packet = if authenticated && is_key_pressed(KeyCode::E) {
+            let packet = if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
+                encode_client_craft(sequence, CraftRecipe::CampKit)
+            } else if authenticated && is_key_pressed(KeyCode::E) {
                 nearest_resource_id(&resources, player)
                     .map(|resource_id| encode_client_interact(sequence, resource_id))
                     .unwrap_or_else(|| encode_client_input(sequence, input))
@@ -210,6 +218,7 @@ async fn main() {
                     update_remote_players(&mut other_players, &message.snapshots, player.player_id);
                     resources = message.resources;
                     inventory = message.inventory;
+                    crafted_kits = message.crafted_kits;
                     last_server_response = Some(Instant::now());
                     game_error = None;
                 }
@@ -271,6 +280,9 @@ async fn main() {
             LIGHTGRAY,
         );
         draw_inventory(&inventory);
+        if crafting_open {
+            draw_crafting_panel(&inventory, crafted_kits);
+        }
 
         if game_error.is_some() || connection_lost {
             draw_rectangle(
@@ -360,6 +372,49 @@ fn draw_inventory(inventory: &[InventoryStack]) {
         text.push_str(&format!(" {name} {}", stack.quantity));
     }
     draw_text(&text, 24.0, screen_height() - 48.0, 18.0, LIGHTGRAY);
+}
+
+fn draw_crafting_panel(inventory: &[InventoryStack], crafted_kits: u16) {
+    let panel_width = 390.0;
+    let panel_height = 180.0;
+    let x = (screen_width() - panel_width) * 0.5;
+    let y = (screen_height() - panel_height) * 0.5;
+    draw_rectangle(
+        x,
+        y,
+        panel_width,
+        panel_height,
+        Color::from_rgba(20, 25, 30, 240),
+    );
+    draw_rectangle_lines(x, y, panel_width, panel_height, 2.0, SKYBLUE);
+    draw_text("CRAFTING", x + 24.0, y + 38.0, 26.0, WHITE);
+    draw_text("Camp kit", x + 24.0, y + 78.0, 21.0, LIGHTGRAY);
+    draw_text("3 wood + 2 stone", x + 24.0, y + 106.0, 18.0, LIGHTGRAY);
+    draw_text(
+        &format!("Crafted: {crafted_kits}   Press Enter to craft"),
+        x + 24.0,
+        y + 140.0,
+        17.0,
+        if has_camp_kit_materials(inventory) {
+            GREEN
+        } else {
+            ORANGE
+        },
+    );
+    draw_text("C closes panel", x + 24.0, y + 166.0, 15.0, GRAY);
+}
+
+fn has_camp_kit_materials(inventory: &[InventoryStack]) -> bool {
+    inventory_quantity(inventory, ResourceKind::Wood) >= 3
+        && inventory_quantity(inventory, ResourceKind::Stone) >= 2
+}
+
+fn inventory_quantity(inventory: &[InventoryStack], kind: ResourceKind) -> u16 {
+    inventory
+        .iter()
+        .find(|stack| stack.kind == kind)
+        .map(|stack| stack.quantity)
+        .unwrap_or(0)
 }
 
 fn update_remote_players(

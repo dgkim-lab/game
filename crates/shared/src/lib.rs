@@ -64,6 +64,23 @@ impl TryFrom<u8> for ResourceKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CraftRecipe {
+    CampKit = 1,
+}
+
+impl TryFrom<u8> for CraftRecipe {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::CampKit),
+            _ => Err(DecodeError::InvalidPayload),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResourceSnapshot {
     pub resource_id: u32,
@@ -86,6 +103,7 @@ pub enum MessageType {
     ServerSnapshot = 2,
     ClientAuthenticate = 3,
     ClientInteract = 4,
+    ClientCraft = 5,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -97,6 +115,7 @@ impl TryFrom<u8> for MessageType {
             2 => Ok(Self::ServerSnapshot),
             3 => Ok(Self::ClientAuthenticate),
             4 => Ok(Self::ClientInteract),
+            5 => Ok(Self::ClientCraft),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
@@ -107,6 +126,7 @@ pub enum ClientMessage {
     Input { sequence: u32, input: PlayerInput },
     Authenticate { sequence: u32, token: String },
     Interact { sequence: u32, resource_id: u32 },
+    Craft { sequence: u32, recipe: CraftRecipe },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +136,7 @@ pub struct ServerMessage {
     pub snapshots: Vec<PlayerSnapshot>,
     pub resources: Vec<ResourceSnapshot>,
     pub inventory: Vec<InventoryStack>,
+    pub crafted_kits: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +256,10 @@ pub fn encode_client_interact(sequence: u32, resource_id: u32) -> Vec<u8> {
     )
 }
 
+pub fn encode_client_craft(sequence: u32, recipe: CraftRecipe) -> Vec<u8> {
+    encode_message(MessageType::ClientCraft, sequence, &[recipe as u8])
+}
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
     let (message_type, sequence, payload) = decode_message(bytes)?;
     match message_type {
@@ -264,6 +289,15 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
                 ),
             })
         }
+        MessageType::ClientCraft => {
+            if payload.len() != 1 {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Craft {
+                sequence,
+                recipe: CraftRecipe::try_from(payload[0])?,
+            })
+        }
         MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
 }
@@ -283,6 +317,17 @@ pub fn encode_server_state(
     resources: &[ResourceSnapshot],
     inventory: &[InventoryStack],
 ) -> Vec<u8> {
+    encode_server_state_with_crafting(sequence, player_id, snapshots, resources, inventory, 0)
+}
+
+pub fn encode_server_state_with_crafting(
+    sequence: u32,
+    player_id: PlayerId,
+    snapshots: &[PlayerSnapshot],
+    resources: &[ResourceSnapshot],
+    inventory: &[InventoryStack],
+    crafted_kits: u16,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
         12 + snapshots.len() * PlayerSnapshot::BYTE_LEN
             + resources.len() * ResourceSnapshot::BYTE_LEN
@@ -297,6 +342,7 @@ pub fn encode_server_state(
     for stack in inventory {
         stack.encode(&mut payload);
     }
+    payload.extend_from_slice(&crafted_kits.to_le_bytes());
     for snapshot in snapshots {
         payload.extend_from_slice(&snapshot.encode());
     }
@@ -354,6 +400,16 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         .collect::<Result<Vec<_>, _>>()?;
     offset = inventory_end;
 
+    if offset + 2 > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let crafted_kits = u16::from_le_bytes(
+        payload[offset..offset + 2]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    );
+    offset += 2;
+
     if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
         return Err(DecodeError::InvalidPayload);
     }
@@ -368,6 +424,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         snapshots,
         resources,
         inventory,
+        crafted_kits,
     })
 }
 
@@ -466,6 +523,20 @@ mod tests {
             ClientMessage::Interact {
                 sequence: 44,
                 resource_id: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn client_crafting_round_trips_through_versioned_envelope() {
+        let packet = encode_client_craft(45, CraftRecipe::CampKit);
+        let decoded = decode_client_message(&packet).expect("valid crafting packet");
+
+        assert_eq!(
+            decoded,
+            ClientMessage::Craft {
+                sequence: 45,
+                recipe: CraftRecipe::CampKit,
             }
         );
     }
