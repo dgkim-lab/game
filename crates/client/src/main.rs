@@ -42,7 +42,7 @@ fn window_conf() -> Conf {
         window_title: "Frontier Echoes".to_owned(),
         window_width: WORLD_SIZE as i32,
         window_height: WORLD_SIZE as i32,
-        window_resizable: false,
+        window_resizable: true,
         ..Default::default()
     }
 }
@@ -225,6 +225,7 @@ async fn main() {
         }
 
         let world = world.as_ref().expect("world loaded before gameplay loop");
+        set_camera(&world_camera(player));
         clear_background(color(world.background));
         draw_world(world);
         draw_resources(&resources, player);
@@ -237,6 +238,7 @@ async fn main() {
         draw_circle(player.x, player.y, 16.0, SKYBLUE);
         draw_circle_lines(player.x, player.y, 16.0, 2.0, WHITE);
 
+        set_default_camera();
         draw_text("FRONTIER ECHOES", 24.0, 34.0, 28.0, WHITE);
         draw_text("WASD  Move", 24.0, 62.0, 20.0, LIGHTGRAY);
         draw_text("E  Gather nearby resource", 24.0, 86.0, 18.0, LIGHTGRAY);
@@ -296,6 +298,30 @@ fn nearest_resource_id(resources: &[ResourceSnapshot], player: PlayerSnapshot) -
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
         .map(|(_, resource_id)| resource_id)
+}
+
+fn world_camera(player: PlayerSnapshot) -> Camera2D {
+    let width = screen_width().max(1.0);
+    let height = screen_height().max(1.0);
+    let target_x = if width >= WORLD_SIZE {
+        WORLD_SIZE * 0.5
+    } else {
+        player.x.clamp(width * 0.5, WORLD_SIZE - width * 0.5)
+    };
+    let target_y = if height >= WORLD_SIZE {
+        WORLD_SIZE * 0.5
+    } else {
+        player.y.clamp(height * 0.5, WORLD_SIZE - height * 0.5)
+    };
+
+    Camera2D {
+        target: vec2(target_x, target_y),
+        // Direct-to-window cameras invert Y internally; use a positive Y zoom
+        // so world coordinates keep the same top-left origin as the default
+        // Macroquad screen (and the server's movement coordinates).
+        zoom: vec2(2.0 / width, 2.0 / height),
+        ..Default::default()
+    }
 }
 
 fn draw_resources(resources: &[ResourceSnapshot], player: PlayerSnapshot) {
