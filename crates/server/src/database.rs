@@ -42,43 +42,6 @@ impl Database {
         Ok(Self { pool })
     }
 
-    #[instrument(skip(self), fields(character.name = character_name))]
-    pub async fn load_or_create_character(
-        &self,
-        character_name: &str,
-    ) -> Result<CharacterState, sqlx::Error> {
-        let account = sqlx::query(
-            "INSERT INTO accounts (username, password_hash)
-             VALUES ($1, $2)
-             ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username
-             RETURNING id",
-        )
-        .bind(format!("{character_name}-account"))
-        .bind("local-development-placeholder")
-        .fetch_one(&self.pool)
-        .await?;
-        let account_id: i64 = account.try_get("id")?;
-
-        let character = sqlx::query(
-            "INSERT INTO characters (account_id, display_name)
-             VALUES ($1, $2)
-             ON CONFLICT (display_name) DO UPDATE SET display_name = EXCLUDED.display_name
-             RETURNING id, position_x, position_y, health, stamina",
-        )
-        .bind(account_id)
-        .bind(character_name)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(CharacterState {
-            id: character.try_get("id")?,
-            x: character.try_get("position_x")?,
-            y: character.try_get("position_y")?,
-            health: character.try_get("health")?,
-            stamina: character.try_get("stamina")?,
-        })
-    }
-
     pub async fn create_account(
         &self,
         username: &str,
@@ -147,6 +110,34 @@ impl Database {
                 .fetch_optional(&self.pool)
                 .await?;
         character.map(|row| row.try_get("id")).transpose()
+    }
+
+    pub async fn load_character_for_account(
+        &self,
+        account_id: i64,
+    ) -> Result<Option<CharacterState>, sqlx::Error> {
+        let character = sqlx::query(
+            "SELECT id, position_x, position_y, health, stamina
+             FROM characters
+             WHERE account_id = $1
+             ORDER BY id
+             LIMIT 1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        character
+            .map(|row| {
+                Ok(CharacterState {
+                    id: row.try_get("id")?,
+                    x: row.try_get("position_x")?,
+                    y: row.try_get("position_y")?,
+                    health: row.try_get("health")?,
+                    stamina: row.try_get("stamina")?,
+                })
+            })
+            .transpose()
     }
 
     #[instrument(skip(self), fields(character.id = character_id))]

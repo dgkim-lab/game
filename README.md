@@ -41,9 +41,9 @@ cp .env.example .env
 cargo run -p frontier-server
 ```
 
-The server now connects to PostgreSQL, loads the configured development character, and
-saves its position every five seconds. The UDP address, tick rate, character name, and
-maximum database connection setting can also be changed in `.env`.
+The server now connects to PostgreSQL and saves each authenticated character's position
+every five seconds. The UDP address, tick rate, and maximum database connection setting
+can be changed in `.env`.
 
 The server also provides the world asset manifest over HTTP on `GAME_ASSET_ADDR`. The
 manifest is loaded from the PostgreSQL `game_assets` table, and the client downloads it
@@ -61,8 +61,16 @@ curl -X POST http://127.0.0.1:8080/auth/login \
   -d '{"username":"pilot1","password":"correct horse battery staple"}'
 ```
 
-Signup and login return a Redis-backed bearer session token. The graphical client login
-screen and authenticated UDP handshake are the next authentication steps.
+Signup and login return a Redis-backed session token. The client currently accepts that
+token through `GAME_SESSION_TOKEN` and sends it in the UDP authentication handshake:
+
+```bash
+GAME_SESSION_TOKEN=<token-from-signup-or-login> cargo run -p frontier-client
+```
+
+The server resolves the token in Redis, then loads that account's character from
+PostgreSQL. Tokens are currently sent over the prototype UDP protocol without transport
+encryption; an encrypted transport will be required before production deployment.
 
 ## Server tracing
 

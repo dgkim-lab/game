@@ -5,7 +5,6 @@ pub struct Config {
     pub server_addr: String,
     pub database_url: String,
     pub redis_url: String,
-    pub character_name: String,
     pub otlp_endpoint: Option<String>,
     pub asset_addr: String,
     pub api_addr: String,
@@ -31,7 +30,6 @@ impl Config {
         let database_url = required("DATABASE_URL")?;
         let redis_url = required("REDIS_URL")?;
         let server_addr = optional("GAME_SERVER_ADDR", "127.0.0.1:4000");
-        let character_name = optional("GAME_CHARACTER_NAME", "local-player");
         let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
         let asset_addr = optional("GAME_ASSET_ADDR", "127.0.0.1:4100");
         let api_addr = optional("GAME_API_ADDR", "127.0.0.1:8080");
@@ -42,7 +40,6 @@ impl Config {
             server_addr,
             database_url,
             redis_url,
-            character_name,
             otlp_endpoint,
             asset_addr,
             api_addr,

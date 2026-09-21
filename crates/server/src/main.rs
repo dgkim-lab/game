@@ -7,7 +7,8 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_snapshot, PlayerId, PlayerInput, PlayerSnapshot,
+    decode_client_message, encode_server_snapshot, ClientMessage, PlayerId, PlayerInput,
+    PlayerSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -82,7 +83,6 @@ async fn main() {
         max_connections = config.database_max_connections,
         "database pool configured"
     );
-    info!(character = %config.character_name, "loading character");
     let asset_addr = config.asset_addr.clone();
     let asset_database = database.clone();
     tokio::spawn(async move {
@@ -118,39 +118,57 @@ async fn main() {
             let Ok(message) = decode_client_message(&buffer[..size]) else {
                 continue;
             };
-            let input = message.input;
-
-            if !players.contains_key(&address) {
-                let character = database
-                    .load_or_create_character(&config.character_name)
-                    .await
-                    .unwrap_or_else(|error| {
-                        error!(%error, "could not load character from PostgreSQL");
-                        std::process::exit(1);
-                    });
-                let player = PlayerState {
-                    id: next_id,
-                    character_id: character.id,
-                    x: character.x,
-                    y: character.y,
-                    health: character.health,
-                    stamina: character.stamina,
-                    input: PlayerInput::default(),
-                    sequence: message.sequence,
-                };
-                info!(player_id = player.id, %address, "player connected");
-                next_id += 1;
-                players.insert(address, player);
-            }
-
-            let player = players
-                .get_mut(&address)
-                .expect("player inserted immediately above");
-
-            player.input = input;
-            player.sequence = message.sequence;
-            if let Err(error) = presence.refresh(player.id).await {
-                error!(player_id = player.id, %error, "could not refresh Redis presence");
+            match message {
+                ClientMessage::Authenticate { sequence, token } => {
+                    if players.contains_key(&address) {
+                        continue;
+                    }
+                    let Some(account_id) = auth::account_id_for_token(&redis_client, &token)
+                        .await
+                        .unwrap_or_else(|error| {
+                            warn!(%error, %address, "could not resolve game session");
+                            None
+                        })
+                    else {
+                        warn!(%address, "rejected game connection with invalid session");
+                        continue;
+                    };
+                    let Some(character) = database
+                        .load_character_for_account(account_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            error!(%error, account_id, "could not load character from PostgreSQL");
+                            None
+                        })
+                    else {
+                        warn!(%address, account_id, "account has no character");
+                        continue;
+                    };
+                    let player = PlayerState {
+                        id: next_id,
+                        character_id: character.id,
+                        x: character.x,
+                        y: character.y,
+                        health: character.health,
+                        stamina: character.stamina,
+                        input: PlayerInput::default(),
+                        sequence,
+                    };
+                    info!(player_id = player.id, account_id, character_id = player.character_id, %address, "player authenticated");
+                    presence.refresh(player.id).await.ok();
+                    next_id += 1;
+                    players.insert(address, player);
+                }
+                ClientMessage::Input { sequence, input } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    player.input = input;
+                    player.sequence = sequence;
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 

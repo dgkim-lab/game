@@ -147,6 +147,15 @@ fn session_key(token: &str) -> String {
     format!("frontier:session:{token}")
 }
 
+pub async fn account_id_for_token(
+    redis: &redis::Client,
+    token: &str,
+) -> Result<Option<i64>, redis::RedisError> {
+    let mut connection = redis.get_multiplexed_async_connection().await?;
+    let account_id: Option<i64> = connection.get(session_key(token)).await?;
+    Ok(account_id)
+}
+
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(AUTHORIZATION)?

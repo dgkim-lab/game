@@ -1,5 +1,6 @@
 use frontier_shared::{
-    decode_server_message, encode_client_input, PlayerInput, PlayerSnapshot, WorldAsset,
+    decode_server_message, encode_client_authenticate, encode_client_input, PlayerInput,
+    PlayerSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -30,6 +31,8 @@ async fn main() {
     let mut other_players = Vec::new();
     let mut receive_buffer = [0; 256];
     let mut sequence = 0;
+    let session_token = std::env::var("GAME_SESSION_TOKEN").unwrap_or_default();
+    let mut authenticated = false;
 
     loop {
         if world.is_none() {
@@ -72,6 +75,7 @@ async fn main() {
                     game_error = None;
                     last_server_response = None;
                     sequence = 0;
+                    authenticated = false;
                 }
                 Err(error) => game_error = Some(error),
             }
@@ -82,13 +86,22 @@ async fn main() {
             move_y: i8::from(is_key_down(KeyCode::S)) - i8::from(is_key_down(KeyCode::W)),
         };
         if let Some(socket) = socket.as_ref() {
-            if socket.send(&encode_client_input(sequence, input)).is_err() {
+            let packet = if authenticated {
+                encode_client_input(sequence, input)
+            } else if session_token.is_empty() {
+                game_error = Some("set GAME_SESSION_TOKEN after signing in".to_owned());
+                Vec::new()
+            } else {
+                encode_client_authenticate(sequence, &session_token)
+            };
+            if !packet.is_empty() && socket.send(&packet).is_err() {
                 game_error = Some("could not send input to game server".to_owned());
             }
             sequence = sequence.wrapping_add(1);
 
             while let Ok(size) = socket.recv(&mut receive_buffer) {
                 if let Ok(message) = decode_server_message(&receive_buffer[..size]) {
+                    authenticated = true;
                     player.player_id = message.player_id;
                     if let Some(own_snapshot) = message
                         .snapshots

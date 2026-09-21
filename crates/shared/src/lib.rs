@@ -48,6 +48,7 @@ pub struct PlayerSnapshot {
 pub enum MessageType {
     ClientInput = 1,
     ServerSnapshot = 2,
+    ClientAuthenticate = 3,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -57,15 +58,16 @@ impl TryFrom<u8> for MessageType {
         match value {
             1 => Ok(Self::ClientInput),
             2 => Ok(Self::ServerSnapshot),
+            3 => Ok(Self::ClientAuthenticate),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientMessage {
-    pub sequence: u32,
-    pub input: PlayerInput,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientMessage {
+    Input { sequence: u32, input: PlayerInput },
+    Authenticate { sequence: u32, token: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,16 +134,28 @@ pub fn encode_client_input(sequence: u32, input: PlayerInput) -> Vec<u8> {
     encode_message(MessageType::ClientInput, sequence, &input.encode())
 }
 
+pub fn encode_client_authenticate(sequence: u32, token: &str) -> Vec<u8> {
+    encode_message(MessageType::ClientAuthenticate, sequence, token.as_bytes())
+}
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
     let (message_type, sequence, payload) = decode_message(bytes)?;
-    if message_type != MessageType::ClientInput {
-        return Err(DecodeError::UnknownMessageType(message_type as u8));
+    match message_type {
+        MessageType::ClientInput => Ok(ClientMessage::Input {
+            sequence,
+            input: PlayerInput::decode(payload).ok_or(DecodeError::InvalidPayload)?,
+        }),
+        MessageType::ClientAuthenticate => {
+            let token = std::str::from_utf8(payload)
+                .map_err(|_| DecodeError::InvalidPayload)?
+                .to_owned();
+            if token.is_empty() {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Authenticate { sequence, token })
+        }
+        MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
-
-    Ok(ClientMessage {
-        sequence,
-        input: PlayerInput::decode(payload).ok_or(DecodeError::InvalidPayload)?,
-    })
 }
 
 pub fn encode_server_snapshot(
@@ -232,8 +246,27 @@ mod tests {
         let packet = encode_client_input(42, input);
         let decoded = decode_client_message(&packet).expect("valid client packet");
 
-        assert_eq!(decoded.sequence, 42);
-        assert_eq!(decoded.input, input);
+        assert_eq!(
+            decoded,
+            ClientMessage::Input {
+                sequence: 42,
+                input,
+            }
+        );
+    }
+
+    #[test]
+    fn client_authentication_round_trips_through_versioned_envelope() {
+        let packet = encode_client_authenticate(43, "session-token");
+        let decoded = decode_client_message(&packet).expect("valid auth packet");
+
+        assert_eq!(
+            decoded,
+            ClientMessage::Authenticate {
+                sequence: 43,
+                token: "session-token".to_owned(),
+            }
+        );
     }
 
     #[test]
