@@ -288,7 +288,7 @@ async fn main() {
             18.0,
             LIGHTGRAY,
         );
-        draw_inventory(&inventory);
+        draw_inventory(&inventory, crafted_kits);
         draw_vitals(health, stamina, hunger);
         if crafting_open {
             draw_crafting_panel(&inventory, crafted_kits);
@@ -371,7 +371,7 @@ fn draw_resources(resources: &[ResourceSnapshot], player: PlayerSnapshot) {
     }
 }
 
-fn draw_inventory(inventory: &[InventoryStack]) {
+fn draw_inventory(inventory: &[InventoryStack], crafted_kits: u16) {
     let mut text = String::from("Inventory:");
     for stack in inventory {
         let name = match stack.kind {
@@ -381,6 +381,7 @@ fn draw_inventory(inventory: &[InventoryStack]) {
         };
         text.push_str(&format!(" {name} {}", stack.quantity));
     }
+    text.push_str(&format!(" camp kits {crafted_kits}"));
     draw_text(&text, 24.0, screen_height() - 48.0, 18.0, LIGHTGRAY);
 }
 
