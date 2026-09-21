@@ -48,15 +48,15 @@ and recover after death.
 
 Goal: player progress survives a server restart.
 
-- [ ] Account registration and login flow
-- [ ] Secure password handling and session tokens
-- [ ] One authenticated session mapped to one database character
-- [ ] PostgreSQL persistence layer
-- [ ] Character position, inventory, health, and crafted items saved
-- [ ] Periodic saves and graceful shutdown save
-- [ ] Migration strategy for database schema changes
-- [ ] Server-side ownership checks for all saved data
-- [ ] Reconnect resumes the authenticated player's own character
+- [x] Account registration and login flow
+- [x] Secure password handling and session tokens
+- [x] One authenticated session mapped to one database character
+- [x] PostgreSQL persistence layer
+- [x] Character position, inventory, health, and crafted items saved
+- [x] Periodic saves and graceful shutdown save
+- [x] Migration strategy for database schema changes
+- [x] Server-side ownership checks for all saved data
+- [x] Reconnect resumes the authenticated player's own character
 
 Acceptance criteria: a player can leave, restart the server, reconnect, and retain their
 character progress without duplicating or losing items.

@@ -145,6 +145,7 @@ impl Database {
     #[instrument(skip(self), fields(character.id = character_id))]
     pub async fn save_character(
         &self,
+        account_id: i64,
         character_id: i64,
         x: f32,
         y: f32,
@@ -152,10 +153,10 @@ impl Database {
         stamina: f32,
         hunger: f32,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE characters
              SET position_x = $1, position_y = $2, health = $3, stamina = $4, hunger = $5, updated_at = now()
-             WHERE id = $6",
+             WHERE id = $6 AND account_id = $7",
         )
         .bind(x)
         .bind(y)
@@ -163,18 +164,32 @@ impl Database {
         .bind(stamina)
         .bind(hunger)
         .bind(character_id)
+        .bind(account_id)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
         Ok(())
     }
 
-    pub async fn load_inventory(&self, character_id: i64) -> Result<([u16; 3], u16), sqlx::Error> {
+    pub async fn load_inventory(
+        &self,
+        account_id: i64,
+        character_id: i64,
+    ) -> Result<([u16; 3], u16), sqlx::Error> {
         let rows = sqlx::query(
             "SELECT item_code, quantity
              FROM inventory_items
-             WHERE character_id = $1",
+             WHERE character_id = $1
+               AND EXISTS (
+                   SELECT 1 FROM characters
+                   WHERE characters.id = inventory_items.character_id
+                     AND characters.account_id = $2
+               )",
         )
         .bind(character_id)
+        .bind(account_id)
         .fetch_all(&self.pool)
         .await?;
         let mut inventory = [0; 3];
@@ -194,11 +209,20 @@ impl Database {
 
     pub async fn save_inventory(
         &self,
+        account_id: i64,
         character_id: i64,
         inventory: [u16; 3],
         crafted_kits: u16,
     ) -> Result<(), sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
+        let owned = sqlx::query("SELECT 1 FROM characters WHERE id = $1 AND account_id = $2")
+            .bind(character_id)
+            .bind(account_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if owned.is_none() {
+            return Err(sqlx::Error::RowNotFound);
+        }
         sqlx::query("DELETE FROM inventory_items WHERE character_id = $1")
             .bind(character_id)
             .execute(&mut *transaction)

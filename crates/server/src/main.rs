@@ -40,6 +40,7 @@ const PLAYER_ATTACK_DAMAGE: f32 = 25.0;
 #[derive(Debug)]
 struct PlayerState {
     id: PlayerId,
+    account_id: i64,
     character_id: i64,
     x: f32,
     y: f32,
@@ -184,7 +185,7 @@ async fn main() {
                         continue;
                     };
                     let (inventory, crafted_kits) = database
-                        .load_inventory(character.id)
+                        .load_inventory(account_id, character.id)
                         .await
                         .unwrap_or_else(|error| {
                             error!(%error, character_id = character.id, "could not load character inventory");
@@ -192,6 +193,7 @@ async fn main() {
                         });
                     let player = PlayerState {
                         id: next_id,
+                        account_id,
                         character_id: character.id,
                         x: character.x,
                         y: character.y,
@@ -304,29 +306,7 @@ async fn main() {
 
                 if Instant::now() >= next_save {
                     for player in players.values() {
-                        if let Err(error) = database
-                            .save_character(
-                                player.character_id,
-                                player.x,
-                                player.y,
-                                player.health,
-                                player.stamina,
-                                player.hunger,
-                            )
-                            .await
-                        {
-                            error!(character_id = player.character_id, %error, "could not save character");
-                        }
-                        if let Err(error) = database
-                            .save_inventory(
-                                player.character_id,
-                                player.inventory,
-                                player.crafted_kits,
-                            )
-                            .await
-                        {
-                            error!(character_id = player.character_id, %error, "could not save character inventory");
-                        }
+                        save_player(&database, player, "periodic save").await;
                     }
                     next_save = Instant::now() + save_interval;
                 }
@@ -336,6 +316,9 @@ async fn main() {
                     warn!(%error, "shutdown signal listener failed");
                 }
                 info!("shutdown requested");
+                for player in players.values() {
+                    save_player(&database, player, "shutdown save").await;
+                }
                 break;
             }
         }
@@ -346,6 +329,34 @@ async fn main() {
 
 fn is_newer_sequence(sequence: u32, previous: u32) -> bool {
     sequence != previous && sequence.wrapping_sub(previous) < (u32::MAX / 2) + 1
+}
+
+async fn save_player(database: &Database, player: &PlayerState, reason: &str) {
+    if let Err(error) = database
+        .save_character(
+            player.account_id,
+            player.character_id,
+            player.x,
+            player.y,
+            player.health,
+            player.stamina,
+            player.hunger,
+        )
+        .await
+    {
+        error!(character_id = player.character_id, %error, reason, "could not save character");
+    }
+    if let Err(error) = database
+        .save_inventory(
+            player.account_id,
+            player.character_id,
+            player.inventory,
+            player.crafted_kits,
+        )
+        .await
+    {
+        error!(character_id = player.character_id, %error, reason, "could not save character inventory");
+    }
 }
 
 fn advance_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>, delta_seconds: f32) {
@@ -511,6 +522,85 @@ fn send_snapshots(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn player(input: PlayerInput) -> PlayerState {
+        PlayerState {
+            id: 1,
+            account_id: 1,
+            character_id: 1,
+            x: 400.0,
+            y: 300.0,
+            health: 100.0,
+            stamina: 100.0,
+            hunger: 100.0,
+            input,
+            sequence: 1,
+            inventory: [0; 3],
+            crafted_kits: 0,
+        }
+    }
+
+    fn address() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001)
+    }
+
+    #[test]
+    fn one_server_tick_moves_player_at_authoritative_speed() {
+        let mut players = HashMap::from([(
+            address(),
+            player(PlayerInput {
+                move_x: 1,
+                move_y: 0,
+            }),
+        )]);
+
+        advance_players(&mut players, 1.0 / 60.0);
+
+        let state = players.get(&address()).expect("test player exists");
+        assert!((state.x - 403.0).abs() < f32::EPSILON);
+        assert!((state.y - 300.0).abs() < f32::EPSILON);
+        assert!((state.stamina - 99.7).abs() < 0.0001);
+    }
+
+    #[test]
+    fn diagonal_input_is_normalized_before_movement() {
+        let mut players = HashMap::from([(
+            address(),
+            player(PlayerInput {
+                move_x: 1,
+                move_y: 1,
+            }),
+        )]);
+
+        advance_players(&mut players, 1.0);
+
+        let state = players.get(&address()).expect("test player exists");
+        assert!((state.x - (400.0 + SPEED / 2.0_f32.sqrt())).abs() < 0.0001);
+        assert!((state.y - (300.0 + SPEED / 2.0_f32.sqrt())).abs() < 0.0001);
+    }
+
+    #[test]
+    fn authoritative_movement_stays_inside_world_bounds() {
+        let mut state = player(PlayerInput {
+            move_x: -1,
+            move_y: -1,
+        });
+        state.x = WORLD_MIN;
+        state.y = WORLD_MIN;
+        let mut players = HashMap::from([(address(), state)]);
+
+        advance_players(&mut players, 1.0);
+
+        let state = players.get(&address()).expect("test player exists");
+        assert_eq!(state.x, WORLD_MIN);
+        assert_eq!(state.y, WORLD_MIN);
+    }
+}
+
 fn initial_resources() -> Vec<ResourceNode> {
     vec![
         ResourceNode {
@@ -653,25 +743,7 @@ async fn disconnect_expired_players(
             Ok(false) => {
                 if let Some(player) = players.remove(&address) {
                     info!(player_id = player.id, %address, "player disconnected after presence expired");
-                    if let Err(error) = database
-                        .save_character(
-                            player.character_id,
-                            player.x,
-                            player.y,
-                            player.health,
-                            player.stamina,
-                            player.hunger,
-                        )
-                        .await
-                    {
-                        error!(character_id = player.character_id, %error, "could not save disconnected player");
-                    }
-                    if let Err(error) = database
-                        .save_inventory(player.character_id, player.inventory, player.crafted_kits)
-                        .await
-                    {
-                        error!(character_id = player.character_id, %error, "could not save disconnected player inventory");
-                    }
+                    save_player(database, &player, "disconnect save").await;
                 }
             }
             Err(error) => {

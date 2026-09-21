@@ -49,8 +49,7 @@ already been applied to a shared database; create a new migration instead.
 
 The migrations create accounts, characters, inventory items, buildings, and the
 `game_assets` table. The initial world manifest is seeded into `game_assets` and served
-from PostgreSQL by the asset endpoint. The
-server connects to PostgreSQL on startup, loads or creates the configured development
-character, and periodically saves its position, health, and stamina. Authentication and
-multiple-character identity are intentionally not implemented yet; `GAME_CHARACTER_NAME`
-is a temporary development identity.
+from PostgreSQL by the asset endpoint. The server connects to PostgreSQL on startup,
+loads the authenticated account's character and inventory, and saves gameplay state
+periodically, on disconnect, and during graceful shutdown. Character and inventory
+queries verify the authenticated account owns the character being loaded or saved.
