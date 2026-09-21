@@ -164,6 +164,55 @@ impl Database {
         Ok(())
     }
 
+    pub async fn load_inventory(&self, character_id: i64) -> Result<[u16; 3], sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT item_code, quantity
+             FROM inventory_items
+             WHERE character_id = $1",
+        )
+        .bind(character_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut inventory = [0; 3];
+        for row in rows {
+            let item_code: String = row.try_get("item_code")?;
+            let quantity: i32 = row.try_get("quantity")?;
+            let Some(slot) = inventory_slot(&item_code) else {
+                continue;
+            };
+            inventory[slot] = quantity.clamp(0, u16::MAX as i32) as u16;
+        }
+        Ok(inventory)
+    }
+
+    pub async fn save_inventory(
+        &self,
+        character_id: i64,
+        inventory: [u16; 3],
+    ) -> Result<(), sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM inventory_items WHERE character_id = $1")
+            .bind(character_id)
+            .execute(&mut *transaction)
+            .await?;
+
+        for (slot, quantity) in inventory.into_iter().enumerate() {
+            if quantity == 0 {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO inventory_items (character_id, item_code, quantity)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(character_id)
+            .bind(inventory_item_code(slot))
+            .bind(i32::from(quantity))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await
+    }
+
     pub async fn load_asset(&self, asset_key: &str) -> Result<Option<Asset>, sqlx::Error> {
         let asset = sqlx::query(
             "SELECT content_type, data
@@ -182,5 +231,23 @@ impl Database {
                 })
             })
             .transpose()
+    }
+}
+
+fn inventory_slot(item_code: &str) -> Option<usize> {
+    match item_code {
+        "wood" => Some(0),
+        "stone" => Some(1),
+        "berries" => Some(2),
+        _ => None,
+    }
+}
+
+fn inventory_item_code(slot: usize) -> &'static str {
+    match slot {
+        0 => "wood",
+        1 => "stone",
+        2 => "berries",
+        _ => unreachable!("invalid inventory slot"),
     }
 }

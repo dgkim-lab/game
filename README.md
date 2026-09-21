@@ -104,5 +104,6 @@ cargo run -p frontier-server
 cargo run -p frontier-client
 ```
 
-Use `W`, `A`, `S`, and `D` to move. The server validates the movement and sends the
-authoritative position back to the client.
+Use `W`, `A`, `S`, and `D` to move. Press `E` near a resource node to gather wood, stone,
+or berries. The server validates movement and interactions, then sends authoritative
+positions, resource counts, and inventory stacks back to the client.

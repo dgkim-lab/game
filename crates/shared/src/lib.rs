@@ -45,10 +45,47 @@ pub struct PlayerSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+pub enum ResourceKind {
+    Wood = 1,
+    Stone = 2,
+    Berries = 3,
+}
+
+impl TryFrom<u8> for ResourceKind {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Wood),
+            2 => Ok(Self::Stone),
+            3 => Ok(Self::Berries),
+            _ => Err(DecodeError::InvalidPayload),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResourceSnapshot {
+    pub resource_id: u32,
+    pub kind: ResourceKind,
+    pub x: f32,
+    pub y: f32,
+    pub remaining: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryStack {
+    pub kind: ResourceKind,
+    pub quantity: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum MessageType {
     ClientInput = 1,
     ServerSnapshot = 2,
     ClientAuthenticate = 3,
+    ClientInteract = 4,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -59,6 +96,7 @@ impl TryFrom<u8> for MessageType {
             1 => Ok(Self::ClientInput),
             2 => Ok(Self::ServerSnapshot),
             3 => Ok(Self::ClientAuthenticate),
+            4 => Ok(Self::ClientInteract),
             _ => Err(DecodeError::UnknownMessageType(value)),
         }
     }
@@ -68,6 +106,7 @@ impl TryFrom<u8> for MessageType {
 pub enum ClientMessage {
     Input { sequence: u32, input: PlayerInput },
     Authenticate { sequence: u32, token: String },
+    Interact { sequence: u32, resource_id: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +114,8 @@ pub struct ServerMessage {
     pub sequence: u32,
     pub player_id: PlayerId,
     pub snapshots: Vec<PlayerSnapshot>,
+    pub resources: Vec<ResourceSnapshot>,
+    pub inventory: Vec<InventoryStack>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,12 +175,64 @@ impl PlayerSnapshot {
     }
 }
 
+impl ResourceSnapshot {
+    pub const BYTE_LEN: usize = 15;
+
+    fn encode(self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&self.resource_id.to_le_bytes());
+        bytes.push(self.kind as u8);
+        bytes.extend_from_slice(&self.x.to_le_bytes());
+        bytes.extend_from_slice(&self.y.to_le_bytes());
+        bytes.extend_from_slice(&self.remaining.to_le_bytes());
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTE_LEN {
+            return None;
+        }
+        Some(Self {
+            resource_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            kind: ResourceKind::try_from(bytes[4]).ok()?,
+            x: f32::from_le_bytes(bytes[5..9].try_into().ok()?),
+            y: f32::from_le_bytes(bytes[9..13].try_into().ok()?),
+            remaining: u16::from_le_bytes(bytes[13..15].try_into().ok()?),
+        })
+    }
+}
+
+impl InventoryStack {
+    pub const BYTE_LEN: usize = 3;
+
+    fn encode(self, bytes: &mut Vec<u8>) {
+        bytes.push(self.kind as u8);
+        bytes.extend_from_slice(&self.quantity.to_le_bytes());
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTE_LEN {
+            return None;
+        }
+        Some(Self {
+            kind: ResourceKind::try_from(bytes[0]).ok()?,
+            quantity: u16::from_le_bytes(bytes[1..3].try_into().ok()?),
+        })
+    }
+}
+
 pub fn encode_client_input(sequence: u32, input: PlayerInput) -> Vec<u8> {
     encode_message(MessageType::ClientInput, sequence, &input.encode())
 }
 
 pub fn encode_client_authenticate(sequence: u32, token: &str) -> Vec<u8> {
     encode_message(MessageType::ClientAuthenticate, sequence, token.as_bytes())
+}
+
+pub fn encode_client_interact(sequence: u32, resource_id: u32) -> Vec<u8> {
+    encode_message(
+        MessageType::ClientInteract,
+        sequence,
+        &resource_id.to_le_bytes(),
+    )
 }
 
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError> {
@@ -158,6 +251,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
             }
             Ok(ClientMessage::Authenticate { sequence, token })
         }
+        MessageType::ClientInteract => {
+            if payload.len() != 4 {
+                return Err(DecodeError::InvalidPayload);
+            }
+            Ok(ClientMessage::Interact {
+                sequence,
+                resource_id: u32::from_le_bytes(
+                    payload
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidPayload)?,
+                ),
+            })
+        }
         MessageType::ServerSnapshot => Err(DecodeError::UnknownMessageType(message_type as u8)),
     }
 }
@@ -167,8 +273,30 @@ pub fn encode_server_snapshot(
     player_id: PlayerId,
     snapshots: &[PlayerSnapshot],
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(8 + snapshots.len() * PlayerSnapshot::BYTE_LEN);
+    encode_server_state(sequence, player_id, snapshots, &[], &[])
+}
+
+pub fn encode_server_state(
+    sequence: u32,
+    player_id: PlayerId,
+    snapshots: &[PlayerSnapshot],
+    resources: &[ResourceSnapshot],
+    inventory: &[InventoryStack],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(
+        12 + snapshots.len() * PlayerSnapshot::BYTE_LEN
+            + resources.len() * ResourceSnapshot::BYTE_LEN
+            + inventory.len() * InventoryStack::BYTE_LEN,
+    );
     payload.extend_from_slice(&player_id.to_le_bytes());
+    payload.extend_from_slice(&(resources.len() as u16).to_le_bytes());
+    for resource in resources {
+        resource.encode(&mut payload);
+    }
+    payload.extend_from_slice(&(inventory.len() as u16).to_le_bytes());
+    for stack in inventory {
+        stack.encode(&mut payload);
+    }
     for snapshot in snapshots {
         payload.extend_from_slice(&snapshot.encode());
     }
@@ -181,7 +309,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         return Err(DecodeError::UnknownMessageType(message_type as u8));
     }
 
-    if payload.len() < 8 || (payload.len() - 8) % PlayerSnapshot::BYTE_LEN != 0 {
+    if payload.len() < 12 {
         return Err(DecodeError::InvalidPayload);
     }
     let player_id = u64::from_le_bytes(
@@ -190,7 +318,46 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
             .map_err(|_| DecodeError::InvalidPayload)?,
     );
 
-    let snapshots = payload[8..]
+    let mut offset = 8;
+    let resource_count = usize::from(u16::from_le_bytes(
+        payload[offset..offset + 2]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    ));
+    offset += 2;
+    let resources_end = offset + resource_count * ResourceSnapshot::BYTE_LEN;
+    if resources_end > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let resources = payload[offset..resources_end]
+        .chunks_exact(ResourceSnapshot::BYTE_LEN)
+        .map(|chunk| ResourceSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
+        .collect::<Result<Vec<_>, _>>()?;
+    offset = resources_end;
+
+    if offset + 2 > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let inventory_count = usize::from(u16::from_le_bytes(
+        payload[offset..offset + 2]
+            .try_into()
+            .map_err(|_| DecodeError::InvalidPayload)?,
+    ));
+    offset += 2;
+    let inventory_end = offset + inventory_count * InventoryStack::BYTE_LEN;
+    if inventory_end > payload.len() {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let inventory = payload[offset..inventory_end]
+        .chunks_exact(InventoryStack::BYTE_LEN)
+        .map(|chunk| InventoryStack::decode(chunk).ok_or(DecodeError::InvalidPayload))
+        .collect::<Result<Vec<_>, _>>()?;
+    offset = inventory_end;
+
+    if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
+        return Err(DecodeError::InvalidPayload);
+    }
+    let snapshots = payload[offset..]
         .chunks_exact(PlayerSnapshot::BYTE_LEN)
         .map(|chunk| PlayerSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
         .collect::<Result<Vec<_>, _>>()?;
@@ -199,6 +366,8 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         sequence,
         player_id,
         snapshots,
+        resources,
+        inventory,
     })
 }
 
@@ -285,6 +454,40 @@ mod tests {
                 token: "session-token".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn client_interaction_round_trips_through_versioned_envelope() {
+        let packet = encode_client_interact(44, 9);
+        let decoded = decode_client_message(&packet).expect("valid interaction packet");
+
+        assert_eq!(
+            decoded,
+            ClientMessage::Interact {
+                sequence: 44,
+                resource_id: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn server_state_round_trips_resources_and_inventory() {
+        let resource = ResourceSnapshot {
+            resource_id: 3,
+            kind: ResourceKind::Stone,
+            x: 30.0,
+            y: 40.0,
+            remaining: 5,
+        };
+        let inventory = InventoryStack {
+            kind: ResourceKind::Wood,
+            quantity: 2,
+        };
+        let packet = encode_server_state(12, 4, &[], &[resource], &[inventory]);
+        let decoded = decode_server_message(&packet).expect("valid server state packet");
+
+        assert_eq!(decoded.resources, vec![resource]);
+        assert_eq!(decoded.inventory, vec![inventory]);
     }
 
     #[test]

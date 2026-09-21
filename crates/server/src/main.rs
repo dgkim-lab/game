@@ -7,8 +7,8 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_snapshot, ClientMessage, PlayerId, PlayerInput,
-    PlayerSnapshot,
+    decode_client_message, encode_server_state, ClientMessage, InventoryStack, PlayerId,
+    PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -20,6 +20,9 @@ use tracing::{error, info, warn};
 const WORLD_MIN: f32 = 32.0;
 const WORLD_MAX: f32 = 768.0;
 const SPEED: f32 = 180.0;
+const RESOURCE_INTERACTION_DISTANCE: f32 = 64.0;
+const RESOURCE_GATHER_AMOUNT: u16 = 1;
+const MAX_STACK: u16 = 20;
 
 #[derive(Debug)]
 struct PlayerState {
@@ -31,6 +34,16 @@ struct PlayerState {
     stamina: f32,
     input: PlayerInput,
     sequence: u32,
+    inventory: [u16; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceNode {
+    id: u32,
+    kind: ResourceKind,
+    x: f32,
+    y: f32,
+    remaining: u16,
 }
 
 #[tokio::main]
@@ -105,6 +118,7 @@ async fn main() {
 
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
+    let mut resources = initial_resources();
     let mut buffer = [0; 256];
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
@@ -144,6 +158,13 @@ async fn main() {
                         warn!(%address, account_id, "account has no character");
                         continue;
                     };
+                    let inventory = database
+                        .load_inventory(character.id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            error!(%error, character_id = character.id, "could not load character inventory");
+                            [0; 3]
+                        });
                     let player = PlayerState {
                         id: next_id,
                         character_id: character.id,
@@ -153,6 +174,7 @@ async fn main() {
                         stamina: character.stamina,
                         input: PlayerInput::default(),
                         sequence,
+                        inventory,
                     };
                     info!(player_id = player.id, account_id, character_id = player.character_id, %address, "player authenticated");
                     presence.refresh(player.id).await.ok();
@@ -186,6 +208,22 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
+                ClientMessage::Interact {
+                    sequence,
+                    resource_id,
+                } => {
+                    let Some(player) = players.get_mut(&address) else {
+                        continue;
+                    };
+                    if !is_newer_sequence(sequence, player.sequence) {
+                        continue;
+                    }
+                    player.sequence = sequence;
+                    gather_resource(player, resource_id, &mut resources);
+                    if let Err(error) = presence.refresh(player.id).await {
+                        error!(player_id = player.id, %error, "could not refresh Redis presence");
+                    }
+                }
             }
         }
 
@@ -193,7 +231,7 @@ async fn main() {
             _ = ticker.tick() => {
                 disconnect_expired_players(&mut players, &mut presence, &database).await;
                 advance_players(&mut players, config.tick_duration_seconds());
-                send_snapshots(&socket, &players);
+                send_snapshots(&socket, &players, &resources);
 
                 if Instant::now() >= next_save {
                     for player in players.values() {
@@ -208,6 +246,12 @@ async fn main() {
                             .await
                         {
                             error!(character_id = player.character_id, %error, "could not save character");
+                        }
+                        if let Err(error) = database
+                            .save_inventory(player.character_id, player.inventory)
+                            .await
+                        {
+                            error!(character_id = player.character_id, %error, "could not save character inventory");
                         }
                     }
                     next_save = Instant::now() + save_interval;
@@ -244,7 +288,11 @@ fn advance_players(players: &mut HashMap<std::net::SocketAddr, PlayerState>, del
     }
 }
 
-fn send_snapshots(socket: &UdpSocket, players: &HashMap<std::net::SocketAddr, PlayerState>) {
+fn send_snapshots(
+    socket: &UdpSocket,
+    players: &HashMap<std::net::SocketAddr, PlayerState>,
+    resources: &[ResourceNode],
+) {
     let snapshots = players
         .values()
         .map(|player| PlayerSnapshot {
@@ -255,9 +303,99 @@ fn send_snapshots(socket: &UdpSocket, players: &HashMap<std::net::SocketAddr, Pl
         .collect::<Vec<_>>();
 
     for (address, player) in players {
-        let packet = encode_server_snapshot(player.sequence, player.id, &snapshots);
+        let resource_snapshots = resources
+            .iter()
+            .map(|resource| ResourceSnapshot {
+                resource_id: resource.id,
+                kind: resource.kind,
+                x: resource.x,
+                y: resource.y,
+                remaining: resource.remaining,
+            })
+            .collect::<Vec<_>>();
+        let inventory = inventory_stacks(player.inventory);
+        let packet = encode_server_state(
+            player.sequence,
+            player.id,
+            &snapshots,
+            &resource_snapshots,
+            &inventory,
+        );
         let _ = socket.send_to(&packet, address);
     }
+}
+
+fn initial_resources() -> Vec<ResourceNode> {
+    vec![
+        ResourceNode {
+            id: 1,
+            kind: ResourceKind::Wood,
+            x: 240.0,
+            y: 230.0,
+            remaining: 8,
+        },
+        ResourceNode {
+            id: 2,
+            kind: ResourceKind::Wood,
+            x: 575.0,
+            y: 260.0,
+            remaining: 8,
+        },
+        ResourceNode {
+            id: 3,
+            kind: ResourceKind::Stone,
+            x: 300.0,
+            y: 520.0,
+            remaining: 8,
+        },
+        ResourceNode {
+            id: 4,
+            kind: ResourceKind::Stone,
+            x: 650.0,
+            y: 540.0,
+            remaining: 8,
+        },
+        ResourceNode {
+            id: 5,
+            kind: ResourceKind::Berries,
+            x: 500.0,
+            y: 470.0,
+            remaining: 8,
+        },
+    ]
+}
+
+fn gather_resource(player: &mut PlayerState, resource_id: u32, resources: &mut [ResourceNode]) {
+    let Some(resource) = resources
+        .iter_mut()
+        .find(|resource| resource.id == resource_id)
+    else {
+        return;
+    };
+    if resource.remaining == 0
+        || (player.x - resource.x).hypot(player.y - resource.y) > RESOURCE_INTERACTION_DISTANCE
+    {
+        return;
+    }
+    let slot = resource.kind as usize - 1;
+    if player.inventory[slot] >= MAX_STACK {
+        return;
+    }
+    resource.remaining -= RESOURCE_GATHER_AMOUNT;
+    player.inventory[slot] += RESOURCE_GATHER_AMOUNT;
+}
+
+fn inventory_stacks(inventory: [u16; 3]) -> Vec<InventoryStack> {
+    [
+        ResourceKind::Wood,
+        ResourceKind::Stone,
+        ResourceKind::Berries,
+    ]
+    .into_iter()
+    .zip(inventory)
+    .filter(|(_, quantity)| *quantity > 0)
+    .map(|(kind, quantity)| InventoryStack { kind, quantity })
+    .collect()
 }
 
 fn redact_database_url(database_url: &str) -> String {
@@ -317,6 +455,12 @@ async fn disconnect_expired_players(
                         .await
                     {
                         error!(character_id = player.character_id, %error, "could not save disconnected player");
+                    }
+                    if let Err(error) = database
+                        .save_inventory(player.character_id, player.inventory)
+                        .await
+                    {
+                        error!(character_id = player.character_id, %error, "could not save disconnected player inventory");
                     }
                 }
             }

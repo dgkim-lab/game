@@ -33,9 +33,9 @@ visible teleporting during normal local play.
 
 Goal: a player can gather, craft, and survive for a short session.
 
-- [ ] Resource nodes such as wood, stone, and berries
-- [ ] Interaction system using `E`
-- [ ] Inventory with item stack limits
+- [x] Resource nodes such as wood, stone, and berries
+- [x] Interaction system using `E`
+- [x] Inventory with item stack limits
 - [ ] Crafting recipes and a simple crafting panel
 - [ ] Health, stamina, hunger, and damage
 - [ ] One hostile creature with basic AI

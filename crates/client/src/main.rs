@@ -1,6 +1,6 @@
 use frontier_shared::{
-    decode_server_message, encode_client_authenticate, encode_client_input, PlayerInput,
-    PlayerSnapshot, WorldAsset,
+    decode_server_message, encode_client_authenticate, encode_client_input, encode_client_interact,
+    InventoryStack, PlayerInput, PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -37,7 +37,17 @@ struct RemotePlayer {
     target_y: f32,
 }
 
-#[macroquad::main("Frontier Echoes")]
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Frontier Echoes".to_owned(),
+        window_width: WORLD_SIZE as i32,
+        window_height: WORLD_SIZE as i32,
+        window_resizable: false,
+        ..Default::default()
+    }
+}
+
+#[macroquad::main(window_conf)]
 async fn main() {
     let mut asset_receiver = spawn_asset_download();
     let mut world = None;
@@ -51,7 +61,9 @@ async fn main() {
         y: 300.0,
     };
     let mut other_players = Vec::new();
-    let mut receive_buffer = [0; 256];
+    let mut resources: Vec<ResourceSnapshot> = Vec::new();
+    let mut inventory: Vec<InventoryStack> = Vec::new();
+    let mut receive_buffer = [0; 2048];
     let mut sequence = 0;
     let mut last_frame = Instant::now();
     let mut session_token = std::env::var("GAME_SESSION_TOKEN").unwrap_or_default();
@@ -165,7 +177,11 @@ async fn main() {
             move_y: i8::from(is_key_down(KeyCode::S)) - i8::from(is_key_down(KeyCode::W)),
         };
         if let Some(socket) = socket.as_ref() {
-            let packet = if authenticated {
+            let packet = if authenticated && is_key_pressed(KeyCode::E) {
+                nearest_resource_id(&resources, player)
+                    .map(|resource_id| encode_client_interact(sequence, resource_id))
+                    .unwrap_or_else(|| encode_client_input(sequence, input))
+            } else if authenticated {
                 encode_client_input(sequence, input)
             } else if session_token.is_empty() {
                 game_error = Some("set GAME_SESSION_TOKEN after signing in".to_owned());
@@ -192,6 +208,8 @@ async fn main() {
                         player = *first_snapshot;
                     }
                     update_remote_players(&mut other_players, &message.snapshots, player.player_id);
+                    resources = message.resources;
+                    inventory = message.inventory;
                     last_server_response = Some(Instant::now());
                     game_error = None;
                 }
@@ -209,6 +227,7 @@ async fn main() {
         let world = world.as_ref().expect("world loaded before gameplay loop");
         clear_background(color(world.background));
         draw_world(world);
+        draw_resources(&resources, player);
         for other in &other_players {
             if other.player_id != player.player_id {
                 draw_circle(other.x, other.y, 14.0, ORANGE);
@@ -220,6 +239,7 @@ async fn main() {
 
         draw_text("FRONTIER ECHOES", 24.0, 34.0, 28.0, WHITE);
         draw_text("WASD  Move", 24.0, 62.0, 20.0, LIGHTGRAY);
+        draw_text("E  Gather nearby resource", 24.0, 86.0, 18.0, LIGHTGRAY);
         draw_text(
             &format!("Players online: {}", other_players.len()),
             24.0,
@@ -237,7 +257,7 @@ async fn main() {
         } else {
             GREEN
         };
-        draw_text(connection_text, 24.0, 88.0, 18.0, connection_color);
+        draw_text(connection_text, 24.0, 136.0, 18.0, connection_color);
         draw_text(
             &format!(
                 "Player {}  ({:.0}, {:.0})",
@@ -248,6 +268,7 @@ async fn main() {
             18.0,
             LIGHTGRAY,
         );
+        draw_inventory(&inventory);
 
         if game_error.is_some() || connection_lost {
             draw_rectangle(
@@ -263,6 +284,56 @@ async fn main() {
 
         next_frame().await;
     }
+}
+
+fn nearest_resource_id(resources: &[ResourceSnapshot], player: PlayerSnapshot) -> Option<u32> {
+    resources
+        .iter()
+        .filter(|resource| resource.remaining > 0)
+        .filter_map(|resource| {
+            let distance = (player.x - resource.x).hypot(player.y - resource.y);
+            (distance <= 64.0).then_some((distance, resource.resource_id))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, resource_id)| resource_id)
+}
+
+fn draw_resources(resources: &[ResourceSnapshot], player: PlayerSnapshot) {
+    for resource in resources {
+        if resource.remaining == 0 {
+            continue;
+        }
+        let fill = match resource.kind {
+            ResourceKind::Wood => DARKGREEN,
+            ResourceKind::Stone => GRAY,
+            ResourceKind::Berries => PURPLE,
+        };
+        draw_circle(resource.x, resource.y, 12.0, fill);
+        draw_circle_lines(resource.x, resource.y, 12.0, 2.0, WHITE);
+        draw_text(
+            &resource.remaining.to_string(),
+            resource.x - 5.0,
+            resource.y + 5.0,
+            14.0,
+            WHITE,
+        );
+        if (player.x - resource.x).hypot(player.y - resource.y) <= 64.0 {
+            draw_text("E", resource.x - 5.0, resource.y - 18.0, 16.0, YELLOW);
+        }
+    }
+}
+
+fn draw_inventory(inventory: &[InventoryStack]) {
+    let mut text = String::from("Inventory:");
+    for stack in inventory {
+        let name = match stack.kind {
+            ResourceKind::Wood => "wood",
+            ResourceKind::Stone => "stone",
+            ResourceKind::Berries => "berries",
+        };
+        text.push_str(&format!(" {name} {}", stack.quantity));
+    }
+    draw_text(&text, 24.0, screen_height() - 48.0, 18.0, LIGHTGRAY);
 }
 
 fn update_remote_players(
