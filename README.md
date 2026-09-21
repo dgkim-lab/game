@@ -33,7 +33,8 @@ cargo run -p frontier-client
 ## Server configuration
 
 Copy `.env.example` to `.env` and replace `DATABASE_URL` with the connection string for
-your existing PostgreSQL database. The `.env` file is ignored by Git.
+your existing PostgreSQL database. Set `REDIS_URL` to your existing Redis server. The
+`.env` file is ignored by Git.
 
 ```bash
 cp .env.example .env

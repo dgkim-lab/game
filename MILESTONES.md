@@ -16,8 +16,8 @@ the world or adding MMO-scale systems.
 
 Goal: two local clients can share a stable small world.
 
-- [ ] Server tick loop with explicit fixed timestep
-- [ ] Connection IDs, heartbeats, timeout, and disconnect handling
+- [x] Server tick loop with explicit fixed timestep
+- [x] Connection IDs, heartbeats, timeout, and disconnect handling
 - [ ] Server snapshots containing all visible players
 - [ ] Client interpolation for remote players
 - [ ] Input validation and movement speed limits
