@@ -14,6 +14,8 @@ use axum::{
 use rand_core::OsRng;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tracing::Instrument;
 use uuid::Uuid;
 
 const SESSION_TTL_SECONDS: u64 = 86_400;
@@ -189,8 +191,23 @@ fn validate_credentials(
 }
 
 async fn request_logging(request: Request, next: Next) -> Response {
-    tracing::info!(method = %request.method(), path = %request.uri().path(), "auth request");
-    next.run(request).await
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let span = tracing::info_span!(
+        "http.request",
+        "http.request.method" = %method,
+        "url.path" = %path,
+        "http.response.status_code" = tracing::field::Empty,
+        "http.server.duration_ms" = tracing::field::Empty,
+    );
+    let started = Instant::now();
+    let response = next.run(request).instrument(span.clone()).await;
+    span.record("http.response.status_code", response.status().as_u16());
+    span.record(
+        "http.server.duration_ms",
+        started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    response
 }
 
 fn bad_request(message: &'static str) -> (StatusCode, Json<ErrorResponse>) {
