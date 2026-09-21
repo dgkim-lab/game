@@ -16,6 +16,18 @@ pub struct Asset {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AccountCredentials {
+    pub account_id: i64,
+    pub password_hash: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AccountCharacter {
+    pub account_id: i64,
+    pub character_id: i64,
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: PgPool,
@@ -65,6 +77,76 @@ impl Database {
             health: character.try_get("health")?,
             stamina: character.try_get("stamina")?,
         })
+    }
+
+    pub async fn create_account(
+        &self,
+        username: &str,
+        password_hash: &str,
+    ) -> Result<Option<AccountCharacter>, sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let account = sqlx::query(
+            "INSERT INTO accounts (username, password_hash)
+             VALUES ($1, $2)
+             ON CONFLICT (username) DO NOTHING
+             RETURNING id",
+        )
+        .bind(username)
+        .bind(password_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        let account_id: i64 = account.try_get("id")?;
+        let character = sqlx::query(
+            "INSERT INTO characters (account_id, display_name)
+             VALUES ($1, $2)
+             RETURNING id",
+        )
+        .bind(account_id)
+        .bind(format!("character-{account_id}"))
+        .fetch_one(&mut *transaction)
+        .await?;
+        let character_id: i64 = character.try_get("id")?;
+        transaction.commit().await?;
+
+        Ok(Some(AccountCharacter {
+            account_id,
+            character_id,
+        }))
+    }
+
+    pub async fn find_account(
+        &self,
+        username: &str,
+    ) -> Result<Option<AccountCredentials>, sqlx::Error> {
+        let account = sqlx::query(
+            "SELECT id, password_hash
+             FROM accounts
+             WHERE username = $1",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        account
+            .map(|row| {
+                Ok(AccountCredentials {
+                    account_id: row.try_get("id")?,
+                    password_hash: row.try_get("password_hash")?,
+                })
+            })
+            .transpose()
+    }
+
+    pub async fn character_for_account(&self, account_id: i64) -> Result<Option<i64>, sqlx::Error> {
+        let character =
+            sqlx::query("SELECT id FROM characters WHERE account_id = $1 ORDER BY id LIMIT 1")
+                .bind(account_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        character.map(|row| row.try_get("id")).transpose()
     }
 
     #[instrument(skip(self), fields(character.id = character_id))]

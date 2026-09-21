@@ -49,6 +49,21 @@ The server also provides the world asset manifest over HTTP on `GAME_ASSET_ADDR`
 manifest is loaded from the PostgreSQL `game_assets` table, and the client downloads it
 before opening the game window.
 
+The first authentication API is available on `GAME_API_ADDR`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/auth/signup \
+  -H 'content-type: application/json' \
+  -d '{"username":"pilot1","password":"correct horse battery staple"}'
+
+curl -X POST http://127.0.0.1:8080/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"pilot1","password":"correct horse battery staple"}'
+```
+
+Signup and login return a Redis-backed bearer session token. The graphical client login
+screen and authenticated UDP handshake are the next authentication steps.
+
 ## Server tracing
 
 The server emits structured `tracing` logs to stdout. To export spans over OTLP/gRPC to an

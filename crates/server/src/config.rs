@@ -8,6 +8,7 @@ pub struct Config {
     pub character_name: String,
     pub otlp_endpoint: Option<String>,
     pub asset_addr: String,
+    pub api_addr: String,
     pub tick_hz: u64,
     pub database_max_connections: u32,
 }
@@ -33,6 +34,7 @@ impl Config {
         let character_name = optional("GAME_CHARACTER_NAME", "local-player");
         let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
         let asset_addr = optional("GAME_ASSET_ADDR", "127.0.0.1:4100");
+        let api_addr = optional("GAME_API_ADDR", "127.0.0.1:8080");
         let tick_hz = parse_positive("GAME_TICK_HZ", 60)?;
         let database_max_connections = parse_positive("DATABASE_MAX_CONNECTIONS", 5)? as u32;
 
@@ -43,6 +45,7 @@ impl Config {
             character_name,
             otlp_endpoint,
             asset_addr,
+            api_addr,
             tick_hz,
             database_max_connections,
         })

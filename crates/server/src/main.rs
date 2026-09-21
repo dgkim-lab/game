@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod database;
 mod presence;
@@ -60,6 +61,10 @@ async fn main() {
             eprintln!("run `sqlx migrate run` before starting the server");
             std::process::exit(1);
         });
+    let redis_client = redis::Client::open(config.redis_url.as_str()).unwrap_or_else(|error| {
+        error!(%error, "invalid Redis URL");
+        std::process::exit(1);
+    });
     let mut presence = Presence::connect(&config.redis_url)
         .await
         .unwrap_or_else(|error| {
@@ -86,6 +91,17 @@ async fn main() {
         }
     });
     info!(address = %config.asset_addr, "asset server started");
+    let api_addr = config.api_addr.clone();
+    let auth_state = auth::AuthState {
+        database: database.clone(),
+        redis: redis_client.clone(),
+    };
+    tokio::spawn(async move {
+        if let Err(error) = auth::run_api(&api_addr, auth_state).await {
+            error!(%error, "auth API stopped");
+        }
+    });
+    info!(address = %config.api_addr, "auth API started");
 
     let mut next_id: PlayerId = 1;
     let mut players = HashMap::new();
