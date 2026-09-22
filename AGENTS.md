@@ -45,7 +45,9 @@ docs/       Design and architecture notes
 
 - Treat all client input as untrusted.
 - Validate message size, frequency, identifiers, and ownership on the server.
-- Version protocol messages when compatibility becomes necessary.
+- Increment the protocol version whenever a wire payload layout or message meaning changes;
+  clients and servers must reject mismatched versions explicitly rather than guessing a
+  legacy payload format.
 - Never trust client-provided position, inventory, damage, or resource values.
 - Add reconnect and timeout behavior before adding more world features.
 
