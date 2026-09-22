@@ -5,6 +5,8 @@ use serde::Deserialize;
 /// Stable identifier for a connected player.
 pub type PlayerId = u64;
 
+const BUILDING_SECTION_MAGIC: [u8; 2] = *b"BL";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldAsset {
     pub background: [u8; 4],
@@ -24,7 +26,7 @@ pub struct WorldDecoration {
     pub color: [u8; 4],
 }
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 const MAGIC: [u8; 2] = *b"FE";
 const HEADER_LEN: usize = 10;
 
@@ -46,16 +48,41 @@ pub struct PlayerSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BuildingSnapshot {
     pub building_id: u32,
+    pub kind: BuildingKind,
     pub owner_id: PlayerId,
     pub x: f32,
     pub y: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BuildingKind {
+    Wall = 1,
+    Floor = 2,
+    Storage = 3,
+    Campfire = 4,
+}
+
+impl TryFrom<u8> for BuildingKind {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Wall),
+            2 => Ok(Self::Floor),
+            3 => Ok(Self::Storage),
+            4 => Ok(Self::Campfire),
+            _ => Err(DecodeError::InvalidPayload),
+        }
+    }
+}
+
 impl BuildingSnapshot {
-    pub const BYTE_LEN: usize = 20;
+    pub const BYTE_LEN: usize = 21;
 
     fn encode(self, bytes: &mut Vec<u8>) {
         bytes.extend_from_slice(&self.building_id.to_le_bytes());
+        bytes.push(self.kind as u8);
         bytes.extend_from_slice(&self.owner_id.to_le_bytes());
         bytes.extend_from_slice(&self.x.to_le_bytes());
         bytes.extend_from_slice(&self.y.to_le_bytes());
@@ -67,9 +94,10 @@ impl BuildingSnapshot {
         }
         Some(Self {
             building_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
-            owner_id: u64::from_le_bytes(bytes[4..12].try_into().ok()?),
-            x: f32::from_le_bytes(bytes[12..16].try_into().ok()?),
-            y: f32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            kind: BuildingKind::try_from(bytes[4]).ok()?,
+            owner_id: u64::from_le_bytes(bytes[5..13].try_into().ok()?),
+            x: f32::from_le_bytes(bytes[13..17].try_into().ok()?),
+            y: f32::from_le_bytes(bytes[17..21].try_into().ok()?),
         })
     }
 }
@@ -208,13 +236,35 @@ impl TryFrom<u8> for MessageType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
-    Input { sequence: u32, input: PlayerInput },
-    Authenticate { sequence: u32, token: String },
-    Interact { sequence: u32, resource_id: u32 },
-    Craft { sequence: u32, recipe: CraftRecipe },
-    Consume { sequence: u32, kind: ResourceKind },
-    Attack { sequence: u32 },
-    Build { sequence: u32, x: f32, y: f32 },
+    Input {
+        sequence: u32,
+        input: PlayerInput,
+    },
+    Authenticate {
+        sequence: u32,
+        token: String,
+    },
+    Interact {
+        sequence: u32,
+        resource_id: u32,
+    },
+    Craft {
+        sequence: u32,
+        recipe: CraftRecipe,
+    },
+    Consume {
+        sequence: u32,
+        kind: ResourceKind,
+    },
+    Attack {
+        sequence: u32,
+    },
+    Build {
+        sequence: u32,
+        kind: BuildingKind,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,8 +409,9 @@ pub fn encode_client_attack(sequence: u32) -> Vec<u8> {
     encode_message(MessageType::ClientAttack, sequence, &[])
 }
 
-pub fn encode_client_build(sequence: u32, x: f32, y: f32) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(8);
+pub fn encode_client_build(sequence: u32, kind: BuildingKind, x: f32, y: f32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(9);
+    payload.push(kind as u8);
     payload.extend_from_slice(&x.to_le_bytes());
     payload.extend_from_slice(&y.to_le_bytes());
     encode_message(MessageType::ClientBuild, sequence, &payload)
@@ -420,18 +471,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, DecodeError>
             Ok(ClientMessage::Attack { sequence })
         }
         MessageType::ClientBuild => {
-            if payload.len() != 8 {
+            if payload.len() != 9 {
                 return Err(DecodeError::InvalidPayload);
             }
             Ok(ClientMessage::Build {
                 sequence,
+                kind: BuildingKind::try_from(payload[0])?,
                 x: f32::from_le_bytes(
-                    payload[0..4]
+                    payload[1..5]
                         .try_into()
                         .map_err(|_| DecodeError::InvalidPayload)?,
                 ),
                 y: f32::from_le_bytes(
-                    payload[4..8]
+                    payload[5..9]
                         .try_into()
                         .map_err(|_| DecodeError::InvalidPayload)?,
                 ),
@@ -546,6 +598,7 @@ pub fn encode_server_state_with_buildings(
     for enemy in enemies {
         enemy.encode(&mut payload);
     }
+    payload.extend_from_slice(&BUILDING_SECTION_MAGIC);
     payload.extend_from_slice(&(buildings.len() as u16).to_le_bytes());
     for building in buildings {
         building.encode(&mut payload);
@@ -659,29 +712,36 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage, DecodeError>
         .collect::<Result<Vec<_>, _>>()?;
     offset = enemies_end;
 
-    if offset + 2 > payload.len() {
-        return Err(DecodeError::InvalidPayload);
-    }
-    let building_count = usize::from(u16::from_le_bytes(
-        payload[offset..offset + 2]
-            .try_into()
-            .map_err(|_| DecodeError::InvalidPayload)?,
-    ));
-    offset += 2;
-    let buildings_end = offset + building_count * BuildingSnapshot::BYTE_LEN;
-    if buildings_end > payload.len() {
-        return Err(DecodeError::InvalidPayload);
-    }
-    let buildings = payload[offset..buildings_end]
-        .chunks_exact(BuildingSnapshot::BYTE_LEN)
-        .map(|chunk| BuildingSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
-        .collect::<Result<Vec<_>, _>>()?;
-    offset = buildings_end;
+    let (buildings, snapshots_offset) =
+        if payload.len() >= offset + 4 && payload[offset..offset + 2] == BUILDING_SECTION_MAGIC {
+            offset += 2;
+            if offset + 2 > payload.len() {
+                return Err(DecodeError::InvalidPayload);
+            }
+            let building_count = usize::from(u16::from_le_bytes(
+                payload[offset..offset + 2]
+                    .try_into()
+                    .map_err(|_| DecodeError::InvalidPayload)?,
+            ));
+            let buildings_start = offset + 2;
+            let buildings_end = buildings_start + building_count * BuildingSnapshot::BYTE_LEN;
+            if buildings_end > payload.len() {
+                return Err(DecodeError::InvalidPayload);
+            }
+            let buildings = payload[buildings_start..buildings_end]
+                .chunks_exact(BuildingSnapshot::BYTE_LEN)
+                .map(|chunk| BuildingSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
+                .collect::<Result<Vec<_>, _>>()?;
+            (buildings, buildings_end)
+        } else {
+            // Servers predating building replication placed player snapshots here.
+            (Vec::new(), offset)
+        };
 
-    if (payload.len() - offset) % PlayerSnapshot::BYTE_LEN != 0 {
+    if (payload.len() - snapshots_offset) % PlayerSnapshot::BYTE_LEN != 0 {
         return Err(DecodeError::InvalidPayload);
     }
-    let snapshots = payload[offset..]
+    let snapshots = payload[snapshots_offset..]
         .chunks_exact(PlayerSnapshot::BYTE_LEN)
         .map(|chunk| PlayerSnapshot::decode(chunk).ok_or(DecodeError::InvalidPayload))
         .collect::<Result<Vec<_>, _>>()?;
@@ -828,13 +888,14 @@ mod tests {
 
     #[test]
     fn client_build_round_trips_through_versioned_envelope() {
-        let packet = encode_client_build(47, 320.0, 448.0);
+        let packet = encode_client_build(47, BuildingKind::Campfire, 320.0, 448.0);
         let decoded = decode_client_message(&packet).expect("valid build packet");
 
         assert_eq!(
             decoded,
             ClientMessage::Build {
                 sequence: 47,
+                kind: BuildingKind::Campfire,
                 x: 320.0,
                 y: 448.0,
             }
@@ -901,6 +962,7 @@ mod tests {
     fn server_state_round_trips_buildings() {
         let building = BuildingSnapshot {
             building_id: 4,
+            kind: BuildingKind::Storage,
             owner_id: 7,
             x: 320.0,
             y: 448.0,

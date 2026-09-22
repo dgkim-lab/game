@@ -7,9 +7,9 @@ mod telemetry;
 use config::Config;
 use database::Database;
 use frontier_shared::{
-    decode_client_message, encode_server_state_with_buildings, BuildingSnapshot, ClientMessage,
-    CraftRecipe, EnemySnapshot, InventoryStack, PlayerId, PlayerInput, PlayerSnapshot,
-    PlayerVitals, ResourceKind, ResourceSnapshot,
+    decode_client_message, encode_server_state_with_buildings, BuildingKind, BuildingSnapshot,
+    ClientMessage, CraftRecipe, EnemySnapshot, InventoryStack, PlayerId, PlayerInput,
+    PlayerSnapshot, PlayerVitals, ResourceKind, ResourceSnapshot,
 };
 use presence::Presence;
 use std::{collections::HashMap, net::UdpSocket, time::Duration};
@@ -76,6 +76,7 @@ struct EnemyState {
 #[derive(Debug, Clone, Copy)]
 struct BuildingState {
     id: u32,
+    kind: BuildingKind,
     owner_id: PlayerId,
     x: f32,
     y: f32,
@@ -155,8 +156,26 @@ async fn main() {
     let mut players = HashMap::new();
     let mut resources = initial_resources();
     let mut enemies = initial_enemies();
-    let mut buildings = Vec::new();
-    let mut next_building_id = 1;
+    let mut buildings = database
+        .load_buildings()
+        .await
+        .unwrap_or_else(|error| {
+            error!(%error, "could not load buildings from PostgreSQL");
+            Vec::new()
+        })
+        .into_iter()
+        .filter_map(|record| {
+            let id = u32::try_from(record.id).ok()?;
+            let kind = building_kind_from_code(&record.building_code)?;
+            Some(BuildingState {
+                id,
+                kind,
+                owner_id: 0,
+                x: record.x,
+                y: record.y,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut buffer = [0; 256];
     let tick = Duration::from_secs_f32(config.tick_duration_seconds());
     let save_interval = Duration::from_secs(5);
@@ -167,8 +186,12 @@ async fn main() {
 
     loop {
         while let Ok((size, address)) = socket.recv_from(&mut buffer) {
-            let Ok(message) = decode_client_message(&buffer[..size]) else {
-                continue;
+            let message = match decode_client_message(&buffer[..size]) {
+                Ok(message) => message,
+                Err(error) => {
+                    warn!(%address, size, ?error, "rejected undecodable game packet");
+                    continue;
+                }
             };
             match message {
                 ClientMessage::Authenticate { sequence, token } => {
@@ -304,7 +327,12 @@ async fn main() {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
                 }
-                ClientMessage::Build { sequence, x, y } => {
+                ClientMessage::Build {
+                    sequence,
+                    kind,
+                    x,
+                    y,
+                } => {
                     let Some(player) = players.get_mut(&address) else {
                         continue;
                     };
@@ -314,16 +342,34 @@ async fn main() {
                     player.sequence = sequence;
                     let x = snap_build_coordinate(x);
                     let y = snap_build_coordinate(y);
-                    if !try_place_building(player, x, y, &buildings) {
+                    if !try_place_building(player, kind, x, y, &buildings) {
                         continue;
                     }
+                    let building_id = match database
+                        .insert_building(player.character_id, building_code(kind), x, y)
+                        .await
+                    {
+                        Ok(id) => match u32::try_from(id) {
+                            Ok(id) => id,
+                            Err(error) => {
+                                refund_building_cost(player, kind);
+                                error!(%error, "database building ID exceeds protocol range");
+                                continue;
+                            }
+                        },
+                        Err(error) => {
+                            refund_building_cost(player, kind);
+                            error!(character_id = player.character_id, %error, "could not persist building");
+                            continue;
+                        }
+                    };
                     buildings.push(BuildingState {
-                        id: next_building_id,
+                        id: building_id,
+                        kind,
                         owner_id: player.id,
                         x,
                         y,
                     });
-                    next_building_id = next_building_id.wrapping_add(1).max(1);
                     if let Err(error) = presence.refresh(player.id).await {
                         error!(player_id = player.id, %error, "could not refresh Redis presence");
                     }
@@ -545,6 +591,7 @@ fn send_snapshots(
             .iter()
             .map(|building| BuildingSnapshot {
                 building_id: building.id,
+                kind: building.kind,
                 owner_id: building.owner_id,
                 x: building.x,
                 y: building.y,
@@ -652,18 +699,42 @@ mod tests {
         let mut state = player(PlayerInput::default());
         state.crafted_kits = 2;
 
-        assert!(try_place_building(&mut state, 448.0, 320.0, &[]));
+        assert!(try_place_building(
+            &mut state,
+            BuildingKind::Campfire,
+            448.0,
+            320.0,
+            &[]
+        ));
         assert_eq!(state.crafted_kits, 1);
     }
 
     #[test]
     fn building_placement_rejects_missing_kit_or_invalid_location() {
         let mut state = player(PlayerInput::default());
-        assert!(!try_place_building(&mut state, 448.0, 320.0, &[]));
+        assert!(!try_place_building(
+            &mut state,
+            BuildingKind::Campfire,
+            448.0,
+            320.0,
+            &[]
+        ));
 
         state.crafted_kits = 1;
-        assert!(!try_place_building(&mut state, 32.0, 32.0, &[]));
-        assert!(!try_place_building(&mut state, 700.0, 700.0, &[]));
+        assert!(!try_place_building(
+            &mut state,
+            BuildingKind::Campfire,
+            32.0,
+            32.0,
+            &[]
+        ));
+        assert!(!try_place_building(
+            &mut state,
+            BuildingKind::Campfire,
+            700.0,
+            700.0,
+            &[]
+        ));
         assert_eq!(state.crafted_kits, 1);
     }
 
@@ -673,12 +744,19 @@ mod tests {
         state.crafted_kits = 1;
         let buildings = [BuildingState {
             id: 1,
+            kind: BuildingKind::Campfire,
             owner_id: 2,
             x: 448.0,
             y: 320.0,
         }];
 
-        assert!(!try_place_building(&mut state, 480.0, 320.0, &buildings));
+        assert!(!try_place_building(
+            &mut state,
+            BuildingKind::Campfire,
+            480.0,
+            320.0,
+            &buildings
+        ));
         assert_eq!(state.crafted_kits, 1);
     }
 }
@@ -775,8 +853,28 @@ fn snap_build_coordinate(value: f32) -> f32 {
     (value / 32.0).round() * 32.0
 }
 
+fn building_code(kind: BuildingKind) -> &'static str {
+    match kind {
+        BuildingKind::Wall => "wall",
+        BuildingKind::Floor => "floor",
+        BuildingKind::Storage => "storage",
+        BuildingKind::Campfire => "campfire",
+    }
+}
+
+fn building_kind_from_code(code: &str) -> Option<BuildingKind> {
+    match code {
+        "wall" => Some(BuildingKind::Wall),
+        "floor" => Some(BuildingKind::Floor),
+        "storage" => Some(BuildingKind::Storage),
+        "campfire" => Some(BuildingKind::Campfire),
+        _ => None,
+    }
+}
+
 fn try_place_building(
     player: &mut PlayerState,
+    kind: BuildingKind,
     x: f32,
     y: f32,
     buildings: &[BuildingState],
@@ -789,7 +887,6 @@ fn try_place_building(
         || y < half_size
         || y > WORLD_MAX - half_size
         || (player.x - x).hypot(player.y - y) > BUILDING_PLACEMENT_DISTANCE
-        || player.crafted_kits == 0
         || buildings
             .iter()
             .any(|building| (building.x - x).hypot(building.y - y) < BUILDING_SIZE)
@@ -797,8 +894,43 @@ fn try_place_building(
         return false;
     }
 
-    player.crafted_kits -= 1;
+    match kind {
+        BuildingKind::Wall | BuildingKind::Floor => {
+            if player.inventory[0] < 2 {
+                return false;
+            }
+            player.inventory[0] -= 2;
+        }
+        BuildingKind::Storage => {
+            if player.inventory[0] < 4 || player.inventory[1] < 2 {
+                return false;
+            }
+            player.inventory[0] -= 4;
+            player.inventory[1] -= 2;
+        }
+        BuildingKind::Campfire => {
+            if player.crafted_kits == 0 {
+                return false;
+            }
+            player.crafted_kits -= 1;
+        }
+    }
     true
+}
+
+fn refund_building_cost(player: &mut PlayerState, kind: BuildingKind) {
+    match kind {
+        BuildingKind::Wall | BuildingKind::Floor => {
+            player.inventory[0] = player.inventory[0].saturating_add(2);
+        }
+        BuildingKind::Storage => {
+            player.inventory[0] = player.inventory[0].saturating_add(4);
+            player.inventory[1] = player.inventory[1].saturating_add(2);
+        }
+        BuildingKind::Campfire => {
+            player.crafted_kits = player.crafted_kits.saturating_add(1);
+        }
+    }
 }
 
 fn consume_item(player: &mut PlayerState, kind: ResourceKind) {

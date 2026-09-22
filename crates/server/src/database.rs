@@ -29,6 +29,14 @@ pub struct AccountCharacter {
     pub character_id: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BuildingRecord {
+    pub id: i64,
+    pub building_code: String,
+    pub x: f32,
+    pub y: f32,
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: PgPool,
@@ -253,6 +261,48 @@ impl Database {
             .await?;
         }
         transaction.commit().await
+    }
+
+    pub async fn load_buildings(&self) -> Result<Vec<BuildingRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, building_code, position_x, position_y
+             FROM buildings
+             ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(BuildingRecord {
+                    id: row.try_get("id")?,
+                    building_code: row.try_get("building_code")?,
+                    x: row.try_get("position_x")?,
+                    y: row.try_get("position_y")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn insert_building(
+        &self,
+        owner_character_id: i64,
+        building_code: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO buildings (owner_character_id, building_code, position_x, position_y)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id",
+        )
+        .bind(owner_character_id)
+        .bind(building_code)
+        .bind(x)
+        .bind(y)
+        .fetch_one(&self.pool)
+        .await?;
+        row.try_get("id")
     }
 
     pub async fn load_asset(&self, asset_key: &str) -> Result<Option<Asset>, sqlx::Error> {

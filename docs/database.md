@@ -53,3 +53,5 @@ from PostgreSQL by the asset endpoint. The server connects to PostgreSQL on star
 loads the authenticated account's character and inventory, and saves gameplay state
 periodically, on disconnect, and during graceful shutdown. Character and inventory
 queries verify the authenticated account owns the character being loaded or saved.
+Buildings are loaded at startup and inserted into PostgreSQL immediately after the
+server validates a placement; a failed building insert refunds the placement cost.

@@ -1,8 +1,8 @@
 use frontier_shared::{
     decode_server_message, encode_client_attack, encode_client_authenticate, encode_client_build,
     encode_client_consume, encode_client_craft, encode_client_input, encode_client_interact,
-    BuildingSnapshot, CraftRecipe, EnemySnapshot, InventoryStack, PlayerInput, PlayerSnapshot,
-    ResourceKind, ResourceSnapshot, WorldAsset,
+    BuildingKind, BuildingSnapshot, CraftRecipe, EnemySnapshot, InventoryStack, PlayerInput,
+    PlayerSnapshot, ResourceKind, ResourceSnapshot, WorldAsset,
 };
 use macroquad::prelude::*;
 use std::{
@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SERVER_ADDRESS: &str = "127.0.0.1:4000";
+const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:4000";
 const ASSET_SERVER_ADDRESS: &str = "127.0.0.1:4100";
 const AUTH_API_ADDRESS: &str = "127.0.0.1:8080";
 const WORLD_SIZE: f32 = 800.0;
@@ -72,6 +72,7 @@ async fn main() {
     let mut crafted_kits = 0;
     let mut crafting_open = false;
     let mut build_mode = false;
+    let mut selected_building = BuildingKind::Campfire;
     let mut health = 100.0;
     let mut stamina = 100.0;
     let mut hunger = 100.0;
@@ -86,6 +87,7 @@ async fn main() {
     let mut auth_field = AuthField::Username;
     let mut auth_error = None;
     let mut auth_receiver: Option<Receiver<Result<String, String>>> = None;
+    let mut build_toast: Option<(String, Instant)> = None;
 
     loop {
         if world.is_none() {
@@ -197,11 +199,28 @@ async fn main() {
                 crafting_open = false;
             }
         }
+        if is_key_pressed(KeyCode::Key1) {
+            selected_building = BuildingKind::Wall;
+        } else if is_key_pressed(KeyCode::Key2) {
+            selected_building = BuildingKind::Floor;
+        } else if is_key_pressed(KeyCode::Key3) {
+            selected_building = BuildingKind::Storage;
+        } else if is_key_pressed(KeyCode::Key4) {
+            selected_building = BuildingKind::Campfire;
+        }
         if let Some(socket) = socket.as_ref() {
             let packet =
                 if authenticated && build_mode && is_mouse_button_pressed(MouseButton::Left) {
-                    let preview = build_preview_position(player);
-                    encode_client_build(sequence, preview.0, preview.1)
+                    if let Some(message) =
+                        missing_build_requirement(selected_building, &inventory, crafted_kits)
+                    {
+                        build_toast =
+                            Some((message.to_owned(), Instant::now() + Duration::from_secs(3)));
+                        Vec::new()
+                    } else {
+                        let preview = build_preview_position(player);
+                        encode_client_build(sequence, selected_building, preview.0, preview.1)
+                    }
                 } else if authenticated && is_key_pressed(KeyCode::Space) {
                     encode_client_attack(sequence)
                 } else if authenticated && crafting_open && is_key_pressed(KeyCode::Enter) {
@@ -226,29 +245,40 @@ async fn main() {
             sequence = sequence.wrapping_add(1);
 
             while let Ok(size) = socket.recv(&mut receive_buffer) {
-                if let Ok(message) = decode_server_message(&receive_buffer[..size]) {
-                    authenticated = true;
-                    player.player_id = message.player_id;
-                    if let Some(own_snapshot) = message
-                        .snapshots
-                        .iter()
-                        .find(|snapshot| snapshot.player_id == player.player_id)
-                    {
-                        player = *own_snapshot;
-                    } else if let Some(first_snapshot) = message.snapshots.first() {
-                        player = *first_snapshot;
+                match decode_server_message(&receive_buffer[..size]) {
+                    Ok(message) => {
+                        authenticated = true;
+                        player.player_id = message.player_id;
+                        if let Some(own_snapshot) = message
+                            .snapshots
+                            .iter()
+                            .find(|snapshot| snapshot.player_id == player.player_id)
+                        {
+                            player = *own_snapshot;
+                        } else if let Some(first_snapshot) = message.snapshots.first() {
+                            player = *first_snapshot;
+                        }
+                        update_remote_players(
+                            &mut other_players,
+                            &message.snapshots,
+                            player.player_id,
+                        );
+                        resources = message.resources;
+                        inventory = message.inventory;
+                        crafted_kits = message.crafted_kits;
+                        enemies = message.enemies;
+                        buildings = message.buildings;
+                        health = message.vitals.health;
+                        stamina = message.vitals.stamina;
+                        hunger = message.vitals.hunger;
+                        last_server_response = Some(Instant::now());
+                        game_error = None;
                     }
-                    update_remote_players(&mut other_players, &message.snapshots, player.player_id);
-                    resources = message.resources;
-                    inventory = message.inventory;
-                    crafted_kits = message.crafted_kits;
-                    enemies = message.enemies;
-                    buildings = message.buildings;
-                    health = message.vitals.health;
-                    stamina = message.vitals.stamina;
-                    hunger = message.vitals.hunger;
-                    last_server_response = Some(Instant::now());
-                    game_error = None;
+                    Err(error) => {
+                        let message = format!("invalid server packet: {error:?}");
+                        eprintln!("{message}");
+                        game_error = Some(message);
+                    }
                 }
             }
         } else {
@@ -272,7 +302,7 @@ async fn main() {
         if build_mode {
             let mouse = mouse_position();
             let preview = camera.screen_to_world(vec2(mouse.0, mouse.1));
-            draw_build_preview(preview.x, preview.y);
+            draw_build_preview(preview.x, preview.y, selected_building);
         }
         for other in &other_players {
             if other.player_id != player.player_id {
@@ -320,9 +350,19 @@ async fn main() {
         );
         draw_inventory(&inventory, crafted_kits);
         draw_vitals(health, stamina, hunger);
+        if let Some((message, expires_at)) = build_toast.as_ref() {
+            if Instant::now() < *expires_at {
+                draw_toast(message);
+            } else {
+                build_toast = None;
+            }
+        }
         if build_mode {
             draw_text(
-                "BUILD MODE  Left-click to place camp kit — B to close",
+                &format!(
+                    "BUILD MODE  {} selected — 1 Wall 2 Floor 3 Storage 4 Campfire — B to close",
+                    building_name(selected_building)
+                ),
                 24.0,
                 screen_height() - 72.0,
                 18.0,
@@ -342,7 +382,16 @@ async fn main() {
                 Color::from_rgba(20, 25, 30, 235),
             );
             draw_text("GAME SERVER UNAVAILABLE", 170.0, 255.0, 26.0, ORANGE);
-            draw_text("Press R to reconnect", 235.0, 290.0, 20.0, WHITE);
+            draw_text(
+                game_error
+                    .as_deref()
+                    .unwrap_or("no server snapshot received in the last 2 seconds"),
+                150.0,
+                282.0,
+                16.0,
+                LIGHTGRAY,
+            );
+            draw_text("Press R to reconnect", 235.0, 310.0, 20.0, WHITE);
         }
 
         next_frame().await;
@@ -365,7 +414,7 @@ fn snap_to_build_grid(value: f32) -> f32 {
     (value / BUILD_GRID_SIZE).round() * BUILD_GRID_SIZE
 }
 
-fn draw_build_preview(mouse_x: f32, mouse_y: f32) {
+fn draw_build_preview(mouse_x: f32, mouse_y: f32, kind: BuildingKind) {
     let x = snap_to_build_grid(mouse_x);
     let y = snap_to_build_grid(mouse_y);
     let half_size = BUILDING_SIZE * 0.5;
@@ -393,7 +442,7 @@ fn draw_build_preview(mouse_x: f32, mouse_y: f32) {
         2.0,
         fill,
     );
-    draw_text("camp kit", x - 29.0, y + 5.0, 14.0, WHITE);
+    draw_text(building_name(kind), x - 34.0, y + 5.0, 14.0, WHITE);
 }
 
 fn build_preview_position(player: PlayerSnapshot) -> (f32, f32) {
@@ -405,12 +454,18 @@ fn build_preview_position(player: PlayerSnapshot) -> (f32, f32) {
 fn draw_buildings(buildings: &[BuildingSnapshot]) {
     let half_size = BUILDING_SIZE * 0.5;
     for building in buildings {
+        let color = match building.kind {
+            BuildingKind::Wall => BROWN,
+            BuildingKind::Floor => BEIGE,
+            BuildingKind::Storage => DARKGREEN,
+            BuildingKind::Campfire => ORANGE,
+        };
         draw_rectangle(
             building.x - half_size,
             building.y - half_size,
             BUILDING_SIZE,
             BUILDING_SIZE,
-            BROWN,
+            color,
         );
         draw_rectangle_lines(
             building.x - half_size,
@@ -421,6 +476,40 @@ fn draw_buildings(buildings: &[BuildingSnapshot]) {
             GOLD,
         );
     }
+}
+
+fn building_name(kind: BuildingKind) -> &'static str {
+    match kind {
+        BuildingKind::Wall => "wall",
+        BuildingKind::Floor => "floor",
+        BuildingKind::Storage => "storage",
+        BuildingKind::Campfire => "campfire",
+    }
+}
+
+fn missing_build_requirement(
+    kind: BuildingKind,
+    inventory: &[InventoryStack],
+    crafted_kits: u16,
+) -> Option<&'static str> {
+    let wood = inventory_quantity(inventory, ResourceKind::Wood);
+    let stone = inventory_quantity(inventory, ResourceKind::Stone);
+    match kind {
+        BuildingKind::Wall | BuildingKind::Floor if wood < 2 => Some("Need 2 wood"),
+        BuildingKind::Storage if wood < 4 || stone < 2 => Some("Need 4 wood and 2 stone"),
+        BuildingKind::Campfire if crafted_kits == 0 => Some("Need 1 crafted camp kit"),
+        _ => None,
+    }
+}
+
+fn draw_toast(message: &str) {
+    let width = 330.0;
+    let height = 48.0;
+    let x = (screen_width() - width) * 0.5;
+    let y = screen_height() - 150.0;
+    draw_rectangle(x, y, width, height, Color::from_rgba(35, 25, 20, 235));
+    draw_rectangle_lines(x, y, width, height, 2.0, ORANGE);
+    draw_text(message, x + 18.0, y + 30.0, 18.0, WHITE);
 }
 
 fn world_camera(player: PlayerSnapshot) -> Camera2D {
@@ -837,8 +926,10 @@ fn spawn_asset_download() -> Receiver<Result<WorldAsset, String>> {
 
 fn connect_game_socket() -> Result<UdpSocket, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
+    let server_address =
+        std::env::var("GAME_SERVER_ADDR").unwrap_or_else(|_| DEFAULT_SERVER_ADDRESS.to_owned());
     socket
-        .connect(SERVER_ADDRESS)
+        .connect(server_address)
         .map_err(|error| error.to_string())?;
     socket
         .set_nonblocking(true)

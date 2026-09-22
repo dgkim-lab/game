@@ -67,8 +67,8 @@ Goal: players can create persistent shelters and cooperate.
 
 - [x] Build mode and placement preview
 - [x] Server validation for placement and resource costs
-- [ ] Walls, floors, storage, and campfires
-- [ ] Persistent world structures
+- [x] Walls, floors, storage, and campfires
+- [x] Persistent world structures
 - [ ] Land claims or permission controls
 - [ ] Shared storage permissions
 - [ ] Resource respawn and world reset tools for development

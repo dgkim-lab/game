@@ -46,4 +46,5 @@ magic | version | message type | sequence | payload length | payload
 
 The shared crate validates the envelope before decoding a message. New messages should be
 added as new `MessageType` variants and should preserve compatibility with existing packet
-versions whenever possible.
+versions whenever possible. Incompatible payload layout changes must increment the protocol
+version; clients and servers with different protocol versions are rejected explicitly.

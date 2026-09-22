@@ -45,6 +45,10 @@ The server now connects to PostgreSQL and saves each authenticated character's p
 every five seconds. The UDP address, tick rate, and maximum database connection setting
 can be changed in `.env`.
 
+The client also reads `GAME_SERVER_ADDR` for the UDP game address and defaults to
+`127.0.0.1:4000` when it is unset.
+
+
 The server also provides the world asset manifest over HTTP on `GAME_ASSET_ADDR`. The
 manifest is loaded from the PostgreSQL `game_assets` table, and the client downloads it
 before opening the game window.
@@ -108,9 +112,12 @@ Use `W`, `A`, `S`, and `D` to move. Press `E` near a resource node to gather woo
 or berries. Press `F` to eat one berry and restore hunger. Press `C` to open the crafting
 panel and `Enter` to craft a camp kit when you have enough materials. Press `B` to toggle
 build mode and preview a grid-snapped camp-kit footprint; left-click in build mode to
-place it when you have a crafted kit. The server validates movement, interactions, crafting,
-and building placement, then sends authoritative positions, resource counts, inventory
-stacks, and accepted in-memory structures back to connected clients.
+place it when you have the required materials. Use `1` for walls, `2` for floors, `3` for
+storage, and `4` for campfires. Walls and floors cost 2 wood, storage costs 4 wood and
+2 stone, and campfires consume one crafted camp kit. The server validates movement,
+interactions, crafting, and building placement. Accepted buildings are written to
+PostgreSQL immediately and loaded again when the server starts, then replicated with
+authoritative positions, resource counts, inventory stacks, and world structures.
 Movement consumes stamina, hunger decreases over time, and starvation damages health;
 these survival values are persisted with the character. A hostile creature chases nearby
 players; press `Space` to attack it. Defeated players respawn at the safe starting point.
